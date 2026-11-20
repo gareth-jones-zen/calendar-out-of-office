@@ -1,0 +1,564 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
+using M365Graph;
+using ReviewQueue;
+
+namespace OutOfOffice;
+
+/// <summary>What the mailbox's reply is, as far as out-of-office is concerned.</summary>
+public enum Owner { Idle, Ours, Theirs }
+
+/// <summary>Everything a run, plan, apply or clear works from: the periods ahead, the setting now, and whose it is.</summary>
+public sealed record Picture(List<Period> Periods, Setting Setting, Owner Owner, JsonObject? Written, DateTime Now, DateTime NowUtc);
+
+/// <summary>The state file: what out-of-office wrote (as fingerprints and times, never the messages), what it has raised,
+/// and which messages have been approved. Small, so a backup of it holds nothing personal.</summary>
+public static class State
+{
+    public static JsonObject Load(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? [] : [];
+        }
+        catch (Exception error) when (error is IOException or System.Text.Json.JsonException)
+        {
+            return [];
+        }
+    }
+
+    public static void Save(string path, JsonObject state)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temp = path + ".tmp";
+        File.WriteAllText(temp, state.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        File.Move(temp, path, true);
+    }
+
+    public static JsonObject Table(JsonObject state, string key) =>
+        state[key] as JsonObject ?? (JsonObject)(state[key] = new JsonObject());
+
+    public static string Stamp(DateTime t) => t.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture);
+
+    public static DateTime? Time(JsonNode? node) =>
+        node is JsonValue v && v.TryGetValue<string>(out var s)
+            && DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var t)
+            ? DateTime.SpecifyKind(t, DateTimeKind.Utc) : null;
+
+    public static bool Approved(JsonObject state, string hash) =>
+        state["approved"] is JsonArray a && a.Any(x => x?.GetValue<string>() == hash);
+
+    public static void Approve(JsonObject state, string hash)
+    {
+        var a = state["approved"] as JsonArray ?? (JsonArray)(state["approved"] = new JsonArray());
+        if (!a.Any(x => x?.GetValue<string>() == hash))
+            a.Add((JsonNode?)JsonValue.Create(hash));
+    }
+}
+
+/// <summary>The work of each command, given the office (Graph, or a fake) and the host.</summary>
+public sealed class Runner(Config config, IOffice office, CliHost host)
+{
+    private static readonly CultureInfo En = CultureInfo.InvariantCulture;
+    private readonly Action<string> log = WinBackground.Logger.Create(config.LogFile, null, clock: host.Now);
+    public const string Item = "proposed";
+
+    /// <summary>The periods from five weeks back (one in progress) to days_ahead on, plus max_days to see where the
+    /// last one ends; those already over left out.</summary>
+    public Picture Look(JsonObject state)
+    {
+        var now = host.Now();
+        var nowUtc = Planner.Utc(config, now);
+        var today = DateOnly.FromDateTime(now);
+        var first = today.AddDays(-35);
+        var last = today.AddDays(config.DaysAhead + config.MaxDays + 14);
+        var days = Planner.Classify(config, office.Events(first, last), first, last);
+        var periods = Planner.Periods(config, days).Where(p => p.Off > now && p.On <= now.AddDays(config.DaysAhead)).ToList();
+        var setting = office.Read();
+        var written = state["written"] as JsonObject;
+        Owner owner;
+        // Ours while it's the schedule we wrote and not yet over; a finished one is idle, whoever wrote it.
+        if (written is not null && setting.Status == "scheduled" && !setting.Idle(nowUtc)
+            && setting.Fingerprint() == written["fingerprint"]?.GetValue<string>())
+            owner = Owner.Ours;
+        else
+            owner = setting.Idle(nowUtc) ? Owner.Idle : Owner.Theirs;
+        return new Picture(periods, setting, owner, written, now, nowUtc);
+    }
+
+    /// <summary>A period's reply, its start moved a few minutes ahead if the window has already begun (a reply can
+    /// only be scheduled from the future), or kept as written when it's ours and already running.</summary>
+    public Reply Want(Period p, Picture pic, DateTime? keepStartUtc = null)
+    {
+        var reply = Planner.Render(config, p);
+        if (keepStartUtc is { } kept)
+            return reply with { StartUtc = kept };
+        var soonest = pic.NowUtc.AddMinutes(5);
+        return reply.StartUtc < soonest ? reply with { StartUtc = new DateTime(soonest.Ticks - soonest.Ticks % TimeSpan.TicksPerMinute, DateTimeKind.Utc) } : reply;
+    }
+
+    /// <summary>Why a period can't be written, or null.</summary>
+    public string? Refused(Period p, JsonObject state)
+    {
+        if (p.OpenEnded)
+            return $"it runs past the {config.DaysAhead + config.MaxDays + 14} days read, so its end isn't known";
+        if (p.WeekdaysAway > config.MaxDays)
+            return $"{p.WeekdaysAway:0.#} weekdays away is more than max_days ({config.MaxDays}): check the calendar";
+        if (State.Table(state, "hands_off")[p.Id] is not null)
+            return "you changed or turned off its reply yourself, so it's yours";
+        if (State.Table(state, "status_set")[p.Id] is not null)
+            return "its Teams status message is set";
+        return null;
+    }
+
+    /// <summary>The period that holds the reply we wrote: the same id, or one whose window overlaps it.</summary>
+    public Period? Holding(Picture pic)
+    {
+        if (pic.Written is not { } w)
+            return null;
+        var id = w["period"]?.GetValue<string>();
+        var start = State.Time(w["start"]);
+        var end = State.Time(w["end"]);
+        return pic.Periods.FirstOrDefault(p => p.Id == id)
+               ?? pic.Periods.FirstOrDefault(p => start is { } s && end is { } e && Planner.Utc(config, p.On) < e && Planner.Utc(config, p.Off) > s);
+    }
+
+    /// <summary>One run: settle a lost write, follow what happened to ours, then the next period: proposed (ask) or
+    /// written (act). Returns the lines a dry run prints.</summary>
+    public List<string> Run(JsonObject state, bool dryRun)
+    {
+        var said = new List<string>();
+        if (!config.Enabled)
+        {
+            said.Add("Switched off (enabled = false in the settings): nothing done.");
+            return said;
+        }
+        var pic = Look(state);
+        pic = Settle(state, pic, dryRun, said);
+
+        // What happened to the reply we wrote.
+        if (pic.Written is { } w && pic.Owner != Owner.Ours)
+        {
+            var end = State.Time(w["end"]);
+            var id = w["period"]?.GetValue<string>() ?? "";
+            if (pic.Setting.Idle(pic.NowUtc) && end is { } e && e <= pic.NowUtc.AddMinutes(1))
+                said.Add($"The reply for {id} has finished.");
+            else
+            {
+                said.Add(pic.Setting.Idle(pic.NowUtc)
+                    ? $"The reply for {id} was turned off outside out-of-office: left off, and that period is yours now."
+                    : $"The reply for {id} was changed outside out-of-office: left as it is, and that period is yours now.");
+                if (!dryRun)
+                {
+                    State.Table(state, "hands_off")[id] = State.Stamp(pic.NowUtc);
+                    Raise("changed", $"Out of office: your reply for {id} was changed by hand", id, null, "Nothing to do: out-of-office won't touch that period again.");
+                }
+            }
+            if (!dryRun)
+                state.Remove("written");
+            pic = pic with { Written = null };
+        }
+
+        if (pic.Owner == Owner.Ours)
+            Follow(state, pic, dryRun, said);
+        else if (pic.Owner == Owner.Theirs)
+            Theirs(state, pic, dryRun, said);
+        else
+            Next(state, pic, dryRun, said);
+        if (!dryRun)
+            State.Save(config.StateFile, state);
+        return said;
+    }
+
+    /// <summary>A write whose answer was lost: settled by reading back, never by writing blind.</summary>
+    private Picture Settle(JsonObject state, Picture pic, bool dryRun, List<string> said)
+    {
+        if (state["writing"] is not JsonObject writing)
+            return pic;
+        var expected = writing["fingerprint"]?.GetValue<string>();
+        var previous = writing["previous"]?.GetValue<string>();
+        var current = pic.Setting.Idle(pic.NowUtc) ? "idle" : pic.Setting.Fingerprint();
+        var id = writing["period"]?.GetValue<string>() ?? "";
+        if (current == expected || (expected == "idle" && current == "idle"))
+        {
+            said.Add($"An earlier write for {id} did land: recorded.");
+            if (!dryRun)
+            {
+                if (expected == "idle")
+                    state.Remove("written");
+                else
+                    state["written"] = writing.DeepClone();
+                state.Remove("writing");
+            }
+            var written = expected == "idle" ? null : (JsonObject)writing.DeepClone();
+            return pic with { Written = written, Owner = written is null ? Owner.Idle : Owner.Ours };
+        }
+        if (current == previous && (writing["attempts"]?.GetValue<int>() ?? 1) < 2)
+        {
+            said.Add($"An earlier write for {id} didn't land: it may be made once more.");
+            return pic;
+        }
+        said.Add($"An earlier write for {id} can't be confirmed: the mailbox holds something else. Nothing more is written for it.");
+        if (!dryRun)
+        {
+            state.Remove("writing");
+            Raise("failed", $"Out of office: a write for {id} can't be confirmed", id, null,
+                "Check your automatic replies in Outlook (`out-of-office show`); nothing more is written for this period.");
+        }
+        return pic;
+    }
+
+    /// <summary>Our reply is on: keep it matching its period (decision: a cancelled, shortened or extended period is
+    /// adjusted, and you're told in a line).</summary>
+    private void Follow(JsonObject state, Picture pic, bool dryRun, List<string> said)
+    {
+        var w = pic.Written!;
+        var id = w["period"]?.GetValue<string>() ?? "";
+        var start = State.Time(w["start"])!.Value;
+        var period = Holding(pic);
+        if (period is null)
+        {
+            said.Add($"{id}: no longer in the calendar, so the reply is turned off.");
+            if (!dryRun)
+            {
+                Write(state, pic, id, null, null);
+                Raise("changed", $"Out of office: turned off the reply for {id}", id, null, "Its leave or conference is no longer in your calendar, so the reply was turned off.");
+            }
+            return;
+        }
+        var running = start <= pic.NowUtc;
+        var want = Want(period, pic, running ? start : null);
+        if (want.Fingerprint() == w["fingerprint"]?.GetValue<string>())
+        {
+            said.Add($"{period.Id}: the reply is on as written ({Window(want)}).");
+            return;
+        }
+        var oldEnd = State.Time(w["end"]);
+        var windowMoved = State.Time(w["start"]) != want.StartUtc || oldEnd != want.EndUtc;
+        if (!windowMoved && w["templates"]?.GetValue<string>() != Planner.TemplateHash(config, period.IsLeave)
+            && !(config.Mode == Mode.Act && State.Approved(state, Planner.TemplateHash(config, period.IsLeave))))
+        {
+            said.Add($"{period.Id}: the messages in the settings have changed; asking before the reply is rewritten.");
+            if (!dryRun)
+                Propose(state, period, want, pic);
+            return;
+        }
+        var how = oldEnd is { } e && want.EndUtc > e ? "longer" : oldEnd is { } e2 && want.EndUtc < e2 ? "shorter" : "changed";
+        said.Add($"{period.Id}: the period is {how}, so the reply is rewritten: {Window(want)}.");
+        if (!dryRun)
+        {
+            Write(state, pic, period.Id, want, period, keepStart: running);
+            Raise("changed", $"Out of office: your {period.KindName} is {how}, so the reply now runs {Window(want)}", period.Id, want,
+                "Nothing to do; just so you know.");
+        }
+    }
+
+    /// <summary>A reply out-of-office didn't write: never touched; raised once.</summary>
+    private void Theirs(JsonObject state, Picture pic, bool dryRun, List<string> said)
+    {
+        var fp = pic.Setting.Fingerprint();
+        said.Add($"Your automatic replies are {pic.Setting.Status} ({SettingWindow(pic.Setting)}), set outside out-of-office: left alone.");
+        var next = pic.Periods.FirstOrDefault(p => Refused(p, state) is null);
+        if (next is not null)
+            said.Add($"{next.Id}: waits until that's off ({Window(Want(next, pic))}).");
+        if (dryRun || state["hand_set"]?.GetValue<string>() == fp)
+            return;
+        state["hand_set"] = fp;
+        if (next is not null)
+        {
+            Raise("hand-set", $"Out of office: a reply you set is on, so {next.Id} wasn't scheduled", next.Id, null,
+                "Your own automatic reply is left alone. When it's off, `out-of-office plan` shows the next one; or `out-of-office clear --force --yes` turns yours off.");
+            NotifyOnce(state, "hand-set:" + fp, "Out of office: your own automatic reply is on",
+                [$"So {next.Id} wasn't scheduled. Nothing was changed."]);
+        }
+    }
+
+    /// <summary>No reply is on: the next period, proposed or (act mode, approved messages) written.</summary>
+    private void Next(JsonObject state, Picture pic, bool dryRun, List<string> said)
+    {
+        Period? next = null;
+        foreach (var p in pic.Periods)
+        {
+            var why = Refused(p, state);
+            if (why is null)
+            {
+                next = p;
+                break;
+            }
+            said.Add($"{p.Id}: not scheduled: {why}.");
+        }
+        if (next is null)
+        {
+            if (pic.Periods.Count == 0)
+                said.Add("No leave or conference in the next " + config.DaysAhead + " days that needs a reply.");
+            return;
+        }
+        var want = Want(next, pic);
+        if (next is { IsLeave: false } && config.ConferenceAction == ConferenceAction.Status)
+        {
+            said.Add($"{next.Id}: a Teams status message only (conference.action = \"status\").");
+            if (!config.TeamsStatusMessage)
+            {
+                said.Add("  ...but teams.status_message is false, so nothing is set.");
+                return;
+            }
+        }
+        var hash = Planner.TemplateHash(config, next.IsLeave);
+        var due = DateOnly.FromDateTime(next.On).AddDays(-config.ActDaysBefore) <= DateOnly.FromDateTime(pic.Now);
+        if (config.Mode == Mode.Act && State.Approved(state, hash))
+        {
+            if (!due)
+            {
+                said.Add($"{next.Id}: written on {DateOnly.FromDateTime(next.On).AddDays(-config.ActDaysBefore):ddd d MMM} (act mode): {Window(want)}.");
+                return;
+            }
+            said.Add($"{next.Id}: writing (act mode, messages approved): {Window(want)}.");
+            if (!dryRun)
+            {
+                Write(state, pic, next.Id, want, next);
+                Raise("changed", $"Out of office: scheduled your reply for {Describe(next)}, {Window(want)}", next.Id, want, "Nothing to do; just so you know.");
+            }
+            return;
+        }
+        said.Add($"{next.Id}: to ask about{(config.Mode == Mode.Act ? " (act mode, but these messages haven't been approved yet)" : "")}: {Window(want)}. "
+                 + $"`out-of-office apply {next.Id} --yes` schedules it.");
+        if (!dryRun)
+            Propose(state, next, want, pic);
+    }
+
+    /// <summary>A period raised as a question (once for each version of its reply), and a notification when it starts
+    /// within notify_working_days.</summary>
+    private void Propose(JsonObject state, Period p, Reply want, Picture pic)
+    {
+        var raised = State.Table(state, "raised");
+        // Keyed on the reply as the calendar gives it, not the start moved to now for one already running, so a
+        // period isn't raised again on every run.
+        var fp = Planner.Render(config, p).Fingerprint();
+        if (raised[p.Id]?.GetValue<string>() != fp)
+        {
+            raised[p.Id] = fp;
+            Raise(Item, $"Out of office: schedule your reply for {Describe(p)}?", p.Id, want,
+                $"Check the dates and both messages, then `out-of-office apply {p.Id} --yes` (on your OK only).");
+        }
+        if (WorkingDaysUntil(DateOnly.FromDateTime(pic.Now), DateOnly.FromDateTime(p.On)) <= config.NotifyWorkingDays)
+            NotifyOnce(state, "proposed:" + p.Id, "Out of office: a reply to approve",
+                [$"{Describe(p)}: {Window(want)}.", $"out-of-office apply {p.Id} --yes"]);
+    }
+
+    private int WorkingDaysUntil(DateOnly from, DateOnly to)
+    {
+        var n = 0;
+        for (var d = from; d < to; d = d.AddDays(1))
+            if (config.WorkingDays.Contains(d.DayOfWeek))
+                n++;
+        return n;
+    }
+
+    /// <summary>Apply: schedule one period's reply on the user's say-so. Without --yes, shows what it would write.</summary>
+    public int Apply(JsonObject state, string id, bool yes)
+    {
+        var pic = Look(state);
+        var p = pic.Periods.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase))
+                ?? throw new UsageException($"No period '{id}' in the next {config.DaysAhead} days. `out-of-office plan` lists them.");
+        if (Refused(p, state) is { } why && !why.StartsWith("you changed", StringComparison.Ordinal))
+            throw new UsageException($"{p.Id} can't be scheduled: {why}.");
+        if (pic.Owner == Owner.Theirs)
+            throw new UsageException($"Your automatic replies are {pic.Setting.Status} ({SettingWindow(pic.Setting)}), set outside out-of-office, so nothing was written. Turn yours off first (in Outlook, or `out-of-office clear --force --yes`).");
+        var keep = pic.Owner == Owner.Ours && Holding(pic)?.Id == p.Id && State.Time(pic.Written!["start"]) is { } s && s <= pic.NowUtc ? s : (DateTime?)null;
+        if (pic.Owner == Owner.Ours && Holding(pic)?.Id != p.Id)
+            throw new UsageException($"The reply for {pic.Written!["period"]} is on; only one can be scheduled at a time. `out-of-office clear --yes` turns it off first.");
+        var want = Want(p, pic, keep);
+        host.Out.WriteLine(Preview(p, want));
+        if (!yes)
+        {
+            host.Out.WriteLine($"\nNothing written. `out-of-office apply {p.Id} --yes` schedules it.");
+            return 0;
+        }
+        if (!office.CanWrite())
+            throw new SignInNeededException("Scheduling a reply needs the MailboxSettings.ReadWrite permission, which this sign-in doesn't have yet. "
+                                            + "Run `out-of-office sign-in` at a console (your organisation may need to approve it first).");
+        Write(state, pic, p.Id, want, p, keepStart: keep is not null);
+        State.Approve(state, Planner.TemplateHash(config, p.IsLeave));
+        State.Table(state, "hands_off").Remove(p.Id);
+        DoneItems(p.Id);
+        State.Save(config.StateFile, state);
+        host.Out.WriteLine($"\nScheduled: {Window(want)}.");
+        return 0;
+    }
+
+    /// <summary>Clear: turn off the reply out-of-office wrote; another one only with force.</summary>
+    public int Clear(JsonObject state, bool yes, bool force)
+    {
+        var pic = Look(state);
+        if (pic.Owner == Owner.Idle)
+        {
+            host.Out.WriteLine("Automatic replies are already off (or finished): nothing to do.");
+            return 0;
+        }
+        if (pic.Owner == Owner.Theirs && !force)
+            throw new UsageException($"The reply that's on ({pic.Setting.Status}, {SettingWindow(pic.Setting)}) wasn't written by out-of-office, so it's left alone. --force turns it off anyway.");
+        host.Out.WriteLine($"Would turn off: {pic.Setting.Status}, {SettingWindow(pic.Setting)}.");
+        if (!yes)
+        {
+            host.Out.WriteLine("Nothing changed. Add --yes to turn it off.");
+            return 0;
+        }
+        var id = pic.Written?["period"]?.GetValue<string>() ?? "by-hand";
+        Write(state, pic, id, null, null);
+        if (pic.Owner == Owner.Ours)
+            State.Table(state, "hands_off")[id] = State.Stamp(pic.NowUtc);
+        State.Save(config.StateFile, state);
+        host.Out.WriteLine("Turned off.");
+        return 0;
+    }
+
+    /// <summary>Schedule (or, with no reply, turn off), then read back. "writing" is saved first, so an answer that never
+    /// comes is settled by the next run's read, never by writing again blind.</summary>
+    private void Write(JsonObject state, Picture pic, string id, Reply? reply, Period? period, bool keepStart = false)
+    {
+        var expected = reply?.Fingerprint() ?? "idle";
+        var previous = pic.Setting.Idle(pic.NowUtc) ? "idle" : pic.Setting.Fingerprint();
+        var attempts = state["writing"] is JsonObject w && w["period"]?.GetValue<string>() == id ? (w["attempts"]?.GetValue<int>() ?? 1) + 1 : 1;
+        var record = new JsonObject
+        {
+            ["period"] = id,
+            ["fingerprint"] = expected,
+            ["previous"] = previous,
+            ["attempts"] = attempts,
+            ["at"] = State.Stamp(pic.NowUtc),
+        };
+        if (reply is not null)
+        {
+            record["start"] = State.Stamp(reply.StartUtc);
+            record["end"] = State.Stamp(reply.EndUtc);
+            record["kind"] = period?.KindName;
+            record["templates"] = period is null ? null : Planner.TemplateHash(config, period.IsLeave);
+        }
+        state["writing"] = record;
+        State.Save(config.StateFile, state);
+
+        Exception? failure = null;
+        try
+        {
+            if (reply is null)
+                office.Disable();
+            else if (!(period is { IsLeave: false } && config.ConferenceAction == ConferenceAction.Status))
+                office.Schedule(reply, keepStart);
+        }
+        catch (SignInNeededException)
+        {
+            state.Remove("writing");
+            State.Save(config.StateFile, state);
+            throw;
+        }
+        catch (Exception error)
+        {
+            failure = error;
+        }
+
+        var back = office.Read();
+        var now = back.Idle(pic.NowUtc) ? "idle" : back.Fingerprint();
+        var statusOnly = period is { IsLeave: false } && config.ConferenceAction == ConferenceAction.Status;
+        if (now == expected || statusOnly)
+        {
+            state.Remove("writing");
+            if (statusOnly)
+                State.Table(state, "status_set")[id] = State.Stamp(pic.NowUtc);
+            if (reply is null || statusOnly)
+                state.Remove("written");
+            else
+            {
+                record.Remove("previous");
+                record.Remove("attempts");
+                state["written"] = record;
+            }
+            log(reply is null ? $"turned off the reply ({id})" : $"scheduled {id}: {Window(reply)}");
+        }
+        else if (failure is not null && now == previous)
+        {
+            State.Save(config.StateFile, state);
+            throw new InvalidOperationException($"The write for {id} didn't land ({failure.Message}); it may be made once more.", failure);
+        }
+        else
+        {
+            state.Remove("writing");
+            State.Save(config.StateFile, state);
+            throw new InvalidOperationException($"After writing {id}, the mailbox holds something else; nothing more is written for it."
+                                                + (failure is null ? "" : $" ({failure.Message})"));
+        }
+
+        if (period is { IsLeave: false } && reply is not null && config.TeamsStatusMessage && config.ConferenceAction != ConferenceAction.Reply)
+        {
+            var text = Planner.Fill(config.ConferenceStatus, Planner.Values(config, period));
+            office.StatusMessage(text, reply.EndUtc);
+            log($"Teams status message for {id}: \"{text}\"");
+        }
+    }
+
+    /// <summary>A review item for the session (the previous one for the same period and type replaced).</summary>
+    private void Raise(string type, string title, string period, Reply? reply, string todo)
+    {
+        if (config.Review is not { } review)
+            return;
+        var queue = review.Open(host.Now);
+        var old = queue.Items(review.Source).Where(i => i["period"]?.ToString() == period && i["type"]?.ToString() == type)
+            .Select(i => i["id"]!.ToString()).ToList();
+        if (old.Count > 0)
+            queue.Done(old);
+        var fields = new JsonObject { ["title"] = title, ["period"] = period, ["todo"] = todo };
+        if (reply is not null)
+        {
+            fields["window"] = Window(reply);
+            fields["internal"] = Planner.Plain(reply.Internal);
+            fields["external"] = Planner.Plain(reply.External);
+            fields["audience"] = reply.Audience;
+            fields["command"] = $"out-of-office apply {period} --yes";
+        }
+        queue.Add(review.Source, type, fields);
+    }
+
+    private void DoneItems(string period)
+    {
+        if (config.Review is not { } review)
+            return;
+        var queue = review.Open(host.Now);
+        var ids = queue.Items(review.Source).Where(i => i["period"]?.ToString() == period && i["type"]?.ToString() is Item or "hand-set")
+            .Select(i => i["id"]!.ToString()).ToList();
+        if (ids.Count > 0)
+            queue.Done(ids);
+    }
+
+    private void NotifyOnce(JsonObject state, string key, string title, IEnumerable<string> lines)
+    {
+        var notified = State.Table(state, "notified");
+        if (notified[key] is not null)
+            return;
+        notified[key] = State.Stamp(host.Now());
+        if (config.Notify)
+            host.Notify(title, lines);
+    }
+
+    public string Window(Reply r) =>
+        $"{TimeZoneInfo.ConvertTimeFromUtc(r.StartUtc, config.TimeZone).ToString("ddd d MMM HH:mm", En)} to "
+        + $"{TimeZoneInfo.ConvertTimeFromUtc(r.EndUtc, config.TimeZone).ToString("ddd d MMM HH:mm", En)}";
+
+    public string SettingWindow(Setting s) => s.Status switch
+    {
+        "scheduled" when s.StartUtc is { } a && s.EndUtc is { } b =>
+            $"{TimeZoneInfo.ConvertTimeFromUtc(a, config.TimeZone).ToString("ddd d MMM HH:mm", En)} to {TimeZoneInfo.ConvertTimeFromUtc(b, config.TimeZone).ToString("ddd d MMM HH:mm", En)}",
+        "alwaysEnabled" => "on until turned off",
+        _ => "off",
+    };
+
+    public string Describe(Period p) =>
+        p.IsLeave
+            ? $"leave from {Planner.Date(config, p.First)}, back {Planner.Date(config, p.ReturnDay)}"
+            : $"{p.Event ?? "a conference"}, {Planner.Date(config, p.First)}" + (p.Last != p.First ? $" to {Planner.Date(config, p.Last)}" : "");
+
+    public string Preview(Period p, Reply want) =>
+        $"{p.Id}: {Describe(p)} ({p.WeekdaysAway:0.#} weekday(s) away)\n"
+        + $"  window    {Window(want)}\n"
+        + $"  external  to {want.Audience}\n"
+        + $"  internal  {Planner.Plain(want.Internal)}\n"
+        + $"  external  {Planner.Plain(want.External)}";
+}

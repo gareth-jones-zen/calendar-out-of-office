@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="src/OutOfOffice/OutOfOffice.csproj" />
+  <Project Path="src/OutOfOffice.Console/OutOfOffice.Console.csproj" />
+  <Project Path="src/OutOfOffice.Background/OutOfOffice.Background.csproj" />
+  <Project Path="tests/OutOfOffice.Tests/OutOfOffice.Tests.csproj" />
+</Solution>

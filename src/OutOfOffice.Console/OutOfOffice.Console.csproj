@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>out-of-office</AssemblyName>
+    <RootNamespace>OutOfOffice</RootNamespace>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OutOfOffice\OutOfOffice.csproj" />
+  </ItemGroup>
+</Project>
