@@ -137,6 +137,9 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
         }
         if (!dryRun && config.DeprecatedScheduleKeys.Count > 0)
             log($"settings: {string.Join(" and ", config.DeprecatedScheduleKeys)} at the top level are deprecated: move them to [schedule]");
+        if (!dryRun)
+            foreach (var note in config.LeaveNotes)
+                log(note);
         if (!dryRun && !config.Schedule.IsActive(host.Now(), out var why))
         {
             log($"outside the [schedule] ({why}): nothing done");

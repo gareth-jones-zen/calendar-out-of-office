@@ -112,6 +112,13 @@ public sealed class Config
     public TimeOnly Off { get; init; } = new(8, 0);
     public TimeOnly HalfDayAt { get; init; } = new(12, 30);
 
+    /// <summary>The [leave] settings: background-tools-lib's shared LeaveSettings (a base file's [leave] can supply the
+    /// shared keys), with [bank_holiday]'s older subjects / categories folded in.</summary>
+    public LeaveSettings LeaveSettings { get; init; } = new();
+
+    /// <summary>Notes on the [leave] / [bank_holiday] settings for the log (older keys still used).</summary>
+    public IReadOnlyList<string> LeaveNotes { get; init; } = [];
+
     public required LeaveRules Leave { get; init; }
     public required Regex HalfDay { get; init; }
     public required Messages LeaveMessages { get; init; }
@@ -290,9 +297,32 @@ public sealed class Config
         }
 
         var leave = Section("leave");
-        Strict(leave, "leave", "min_working_days", "subjects", "categories", "half_day", "min_hours", "external_audience", "internal", "external");
         var bank = Section("bank_holiday");
         Strict(bank, "bank_holiday", "subjects", "categories", "alone");
+        LeaveSettings leaveSettings;
+        var leaveNotes = new List<string>();
+        try
+        {
+            leaveSettings = LeaveSettings.Parse(leave, full, ["min_working_days", "external_audience", "internal", "external"]);
+        }
+        catch (FormatException error)
+        {
+            throw new UsageException(error.Message);
+        }
+        // [bank_holiday] subjects / categories (before 0.5.0): the same as [leave]'s bank_holiday_subjects /
+        // bank_holiday_categories, which a base file can share with the other tools. Still read; both at once is an error.
+        foreach (var (old, shared) in new[] { ("subjects", "bank_holiday_subjects"), ("categories", "bank_holiday_categories") })
+        {
+            if (!bank.ContainsKey(old))
+                continue;
+            if (leave.ContainsKey(shared))
+                throw Bad($"bank_holiday.{old} and leave.{shared} are both given: keep leave.{shared} only.");
+            leaveNotes.Add($"settings: bank_holiday.{old} is deprecated: move it to [leave] as {shared}");
+        }
+        if (bank.ContainsKey("subjects"))
+            leaveSettings = leaveSettings with { BankHolidaySubjects = Pattern(Text(bank, "subjects", "bank_holiday.subjects")!, "bank_holiday.subjects") };
+        if (bank.ContainsKey("categories"))
+            leaveSettings = leaveSettings with { BankHolidayCategories = Strings(bank, "categories", "bank_holiday.categories") ?? [] };
         var conference = Section("conference");
         Strict(conference, "conference", "min_working_days", "subjects", "show_as_signals", "min_hours", "ignore_subjects", "action",
             "external_audience", "internal", "external");
@@ -375,14 +405,15 @@ public sealed class Config
             On = Clock(window, "on", "window.on", new TimeOnly(17, 30)),
             Off = Clock(window, "off", "window.off", new TimeOnly(8, 0)),
             HalfDayAt = Clock(window, "half_day_at", "window.half_day_at", new TimeOnly(12, 30)),
-            Leave = new LeaveRules(Pattern(Text(leave, "subjects", "leave.subjects") ?? DefaultLeave, "leave.subjects"),
-                Strings(leave, "categories", "leave.categories") ?? [], Number(leave, "min_hours", "leave.min_hours", 6, 0, 24)),
-            HalfDay = Pattern(Text(leave, "half_day", "leave.half_day") ?? DefaultHalfDay, "leave.half_day"),
+            LeaveSettings = leaveSettings,
+            LeaveNotes = leaveNotes,
+            Leave = leaveSettings.Rules,
+            HalfDay = leaveSettings.HalfDay,
             LeaveMessages = new Messages(Number(leave, "min_working_days", "leave.min_working_days", 3, 0, 366), Audience(leave, "leave.external_audience", "all"),
                 Message(leave, "internal", "leave.internal", "I'm on leave and back on {return_day}."),
                 Message(leave, "external", "leave.external", "I'm on leave and back on {return_day}; I'll reply to your message when I return.")),
-            BankHolidaySubjects = Pattern(Text(bank, "subjects", "bank_holiday.subjects") ?? DefaultBankHoliday, "bank_holiday.subjects"),
-            BankHolidayCategories = Strings(bank, "categories", "bank_holiday.categories") ?? ["Bank holiday"],
+            BankHolidaySubjects = leaveSettings.BankHolidaySubjects,
+            BankHolidayCategories = leaveSettings.BankHolidayCategories,
             BankHolidayAlone = Flag(bank, "alone", "bank_holiday.alone", false),
             Conference = new ElsewhereRules(conferenceSubjects.Length == 0 ? null : Pattern(conferenceSubjects, "conference.subjects"),
                 Strings(conference, "show_as_signals", "conference.show_as_signals") ?? ["workingElsewhere"],

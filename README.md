@@ -56,8 +56,8 @@ day, or a conference.
 - **Leave:** your own entries (no one else invited) whose subject matches `leave.subjects` (by default starting
   "Holiday", "Annual leave", "On leave" or "Summer holidays"), covering at least `leave.min_hours` (6) of the day. One
   matching `leave.half_day` (by default "(half day)"), or covering fewer hours, is a **half day**.
-- **Bank holiday:** your own entries in a `bank_holiday.categories` category (default "Bank holiday") or whose subject
-  starts "Bank holiday".
+- **Bank holiday:** your own entries in a `leave.bank_holiday_categories` category (default "Bank holiday") or whose
+  subject matches `leave.bank_holiday_subjects` (by default starting "Bank holiday").
 - **Conference:** an event whose subject matches `conference.subjects` (conference, summit, expo, exhibition, trade
   show, off-site, and any names you add), or one shown as *Working elsewhere*, covering at least `conference.min_hours`
   (6) or all day. `conference.ignore_subjects` leaves out what isn't being there: a reminder to book one ("Book
@@ -163,6 +163,8 @@ subjects = '^\s*(holiday\b|annual leave|on leave|summer holidays?)'
 categories = []
 half_day = '\(half day\)'
 min_hours = 6
+bank_holiday_subjects = '^\s*bank holiday\b'
+bank_holiday_categories = ["Bank holiday"]
 external_audience = "all"
 internal = '''
 I'm on leave, back on {return_day}. For anything urgent, please contact {cover}.
@@ -172,9 +174,7 @@ I'm on leave and back on {return_day}; I'll reply to your message when I return.
 '''
 
 [bank_holiday]
-subjects = '^\s*bank holiday\b'
-categories = ["Bank holiday"]
-alone = false
+alone = false                   # a bank holiday on its own is a period
 
 [conference]
 min_working_days = 1
@@ -202,6 +202,16 @@ conference_status = "At {event} until {last_day}"
 **Teams:** while a scheduled reply is on, Teams shows you as Out of office with the internal message; nothing more is
 needed for leave. Graph can't set Out of office presence itself, and calendar-out-of-office never sets a preferred presence.
 The optional status message is for a conference you'd rather show as a note than as Out of office.
+
+### [leave]
+
+`subjects`, `categories`, `min_hours`, `half_day`, `bank_holiday_subjects` and `bank_holiday_categories` are
+background-tools-lib's shared leave settings (0.5.0 on): see its README, "`[leave]`: the shared leave settings". With
+`base = "base-config.toml"`, a base file's `[leave]` can hold them once for every tool that reads leave (this tool,
+calendar-work-location, meeting-preps); keep a `[leave]` here for this tool's own keys (`min_working_days`,
+`external_audience`, `internal`, `external`). `[bank_holiday]`'s older `subjects` and `categories` (before 0.5.0) are
+still read, the same as `leave.bank_holiday_subjects` and `leave.bank_holiday_categories`, and a run logs that they've
+moved; giving both is an error. `[bank_holiday] alone` stays where it is.
 
 ## Not verified against a real mailbox yet
 
