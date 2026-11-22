@@ -101,7 +101,7 @@ public static class Cli
                 host.Out.WriteLine(OutOfOffice.Config.CreateDefault(options.Config ?? host.Env(OutOfOffice.Config.EnvConfig), host.Env));
                 return 0;
             }
-            config = OutOfOffice.Config.Load(options.Config, host.Env);
+            config = OutOfOffice.Config.Load(options.Config, host.Env, DateOnly.FromDateTime(host.Now()));
             switch (options.Command)
             {
                 case "sign-in":

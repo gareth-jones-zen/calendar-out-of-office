@@ -29,6 +29,43 @@ public sealed class ConfigTests
         Assert.Contains("window.on", Error(World.Base + "\n[window]\non = \"5.30pm\"\n"));
     }
 
+    private static int DaysAhead(string toolSettings, string? baseSettings)
+    {
+        using var w = new World(null, (baseSettings is null ? "" : "base = \"base.toml\"\n") + toolSettings + World.Base);
+        if (baseSettings is not null)
+            File.WriteAllText(Path.Combine(w.Dir, "base.toml"), baseSettings);
+        return Config.Load(w.ConfigPath, null, new DateOnly(2026, 11, 22)).DaysAhead;
+    }
+
+    [Fact]
+    public void How_far_ahead_comes_from_the_base_files_calendar_months_when_not_set()
+    {
+        // 22 Nov 2026 to 22 Feb 2027: calendar months, not 3 x 30 days.
+        Assert.Equal(92, DaysAhead("", "calendar_months_ahead = 3\n"));
+        Assert.Equal(92, DaysAhead("calendar_months_ahead = 3\n", null));
+    }
+
+    [Fact]
+    public void The_tools_own_days_ahead_wins_over_calendar_months()
+    {
+        Assert.Equal(42, DaysAhead("days_ahead = 42\n", "calendar_months_ahead = 3\n"));
+        Assert.Equal(10, DaysAhead("days_ahead = 10\ncalendar_months_ahead = 3\n", null));
+    }
+
+    [Fact]
+    public void How_far_ahead_defaults_to_42_days_with_neither()
+    {
+        Assert.Equal(42, DaysAhead("", null));
+        Assert.Equal(42, DaysAhead("", "login_hint = \"you@example.com\"\n"));
+    }
+
+    [Fact]
+    public void Calendar_months_ahead_is_checked()
+    {
+        Assert.Contains("calendar_months_ahead", Error("calendar_months_ahead = 0\n" + World.Base));
+        Assert.Contains("calendar_months_ahead", Error("calendar_months_ahead = 13\n" + World.Base));
+    }
+
     [Fact]
     public void An_unknown_setting_is_an_error()
     {

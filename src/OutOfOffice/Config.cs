@@ -72,7 +72,7 @@ public sealed class Config
 
     public static readonly string[] KnownKeys =
     [
-        "login_hint", "tenant", "msal_cache", "log_file", "state_file", "time_zone", "enabled", "mode", "days_ahead",
+        "login_hint", "tenant", "msal_cache", "log_file", "state_file", "time_zone", "enabled", "mode", "days_ahead", "calendar_months_ahead",
         "act_days_before", "working_days", "date_format", "max_days", "every_minutes", "after_unlock_minutes", "notify",
         "notify_working_days", "window", "leave", "bank_holiday", "conference", "placeholders", "teams", "review",
     ];
@@ -138,7 +138,9 @@ public sealed class Config
         return PyPath.Pure(System.IO.Path.Combine(string.IsNullOrEmpty(appData) ? PyPath.Home(env) : appData, "calendar-out-of-office", "config.toml"));
     }
 
-    public static Config Load(string? path = null, Func<string, string?>? env = null)
+    /// <summary>Read the settings. <paramref name="today"/> (default: today in the settings' time zone) is the day
+    /// <c>calendar_months_ahead</c> counts from.</summary>
+    public static Config Load(string? path = null, Func<string, string?>? env = null, DateOnly? today = null)
     {
         env ??= Environment;
         var given = !string.IsNullOrEmpty(path) ? path : env(EnvConfig) is { Length: > 0 } fromEnv ? fromEnv : DefaultPath(env);
@@ -297,6 +299,19 @@ public sealed class Config
         if (raw.TryGetValue("review", out var reviewSection))
             review = ReviewSettings.Read(reviewSection, full, PathSetting);
 
+        // How far ahead: the tool's own days_ahead wins; otherwise calendar_months_ahead (usually from a base file shared
+        // with other calendar tools), as today to the same date that many calendar months on; otherwise 42 days.
+        int Ahead()
+        {
+            if (raw.ContainsKey("days_ahead"))
+                return Whole("days_ahead", 42, 1, 365);
+            if (!raw.ContainsKey("calendar_months_ahead"))
+                return 42;
+            var months = Whole("calendar_months_ahead", 3, 1, 12);
+            var from = today ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTime.UtcNow, zone));
+            return from.AddMonths(months).DayNumber - from.DayNumber;
+        }
+
         var statusTemplate = Text(teams, "conference_status", "teams.conference_status") ?? "At {event} until {last_day}";
         Message(new TomlTable { ["x"] = statusTemplate }, "x", "teams.conference_status", "");
 
@@ -311,7 +326,7 @@ public sealed class Config
             TimeZone = zone,
             Enabled = Flag(raw, "enabled", "enabled", true),
             Mode = mode == "act" ? Mode.Act : Mode.Ask,
-            DaysAhead = Whole("days_ahead", 42, 1, 365),
+            DaysAhead = Ahead(),
             ActDaysBefore = Whole("act_days_before", 7, 0, 60),
             WorkingDays = days,
             DateFormat = Text(raw, "date_format", "date_format") ?? "dddd d MMMM",

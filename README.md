@@ -134,7 +134,9 @@ log_file = "%LOCALAPPDATA%/calendar-out-of-office/calendar-out-of-office.log"
 state_file = "%LOCALAPPDATA%/calendar-out-of-office/state.json"
 enabled = true
 mode = "ask"                    # ask | act
-days_ahead = 42                 # how far ahead it looks
+days_ahead = 42                 # how far ahead it looks; if not set, calendar_months_ahead
+# calendar_months_ahead = 3     # how far ahead, in calendar months (today to the same date N months on), usually
+                                # shared from a base file with other calendar tools; days_ahead wins; default 42 days
 act_days_before = 7             # act mode: how early a period is written
 working_days = ["mon", "tue", "wed", "thu", "fri"]
 date_format = "dddd d MMMM"
