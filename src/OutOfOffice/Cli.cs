@@ -247,18 +247,9 @@ public static class Cli
             case "on":
                 var background = Path.Combine(host.ProgramDir, BackgroundExe);
                 var exe = File.Exists(background) ? background : Path.Combine(host.ProgramDir, "calendar-out-of-office.exe");
-                var schedule = new TaskSchedule
-                {
-                    AtLogon = true,
-                    Every = TimeSpan.FromMinutes(config.EveryMinutes),
-                    AfterUnlock = config.AfterUnlockMinutes is { } u ? TimeSpan.FromMinutes(u) : null,
-                    KeepRunning = false,
-                    TimeLimit = TimeSpan.FromMinutes(5),
-                };
+                var schedule = config.Schedule.ToTaskSchedule(TaskKind.Job, TimeSpan.FromMinutes(5));
                 var line = task.Enable(exe, ["--config", config.Path, "run"], Path.GetDirectoryName(config.Path), schedule);
-                host.Out.WriteLine($"Autostart is on: '{TaskName}' runs every {config.EveryMinutes} minutes, at logon" +
-                                   (config.AfterUnlockMinutes is { } m ? $" and {m} minute(s) after each unlock" : "") +
-                                   $", and has run now.\n  {line}");
+                host.Out.WriteLine($"Autostart is on: '{TaskName}' runs {Describe(config.Schedule)}, and has run now.\n  {line}");
                 return 0;
             case "off":
                 host.Out.WriteLine(task.Disable() ? "Autostart is off." : "Autostart was already off.");
@@ -283,9 +274,26 @@ public static class Cli
                     host.Out.WriteLine($"Autostart is on ('{TaskName}').");
                     foreach (var name in new[] { "state", "last_run", "last_result", "next_run", "command" })
                         host.Out.WriteLine($"  {name.Replace('_', ' '),-12} {info.GetValueOrDefault(name, "")}");
+                    if (ScheduleDrift.Advice(ScheduleDrift.Check(info, config.Schedule.Fingerprint(TaskKind.Job)), "calendar-out-of-office") is { } advice)
+                        host.Out.WriteLine($"  {advice}");
                 }
                 return 0;
         }
+    }
+
+    /// <summary>The task's triggers in words: "every 15 minutes, at logon, 1 minute(s) after each unlock".</summary>
+    internal static string Describe(ScheduleSettings s)
+    {
+        var parts = new List<string>();
+        if (s.EveryMinutes is > 0 and var m)
+            parts.Add($"every {m} minutes");
+        else if (s.DailyAt is { } at)
+            parts.Add($"daily at {at}");
+        if (s.AtLogon)
+            parts.Add("at logon");
+        if (s.AfterUnlockMinutes > 0)
+            parts.Add($"{s.AfterUnlockMinutes} minute(s) after each unlock");
+        return string.Join(", ", parts);
     }
 
     private static Options? Parse(IReadOnlyList<string> argv, CliHost host)

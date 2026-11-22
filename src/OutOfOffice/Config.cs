@@ -5,6 +5,7 @@ using PyCompat;
 using ReviewQueue;
 using Tomlyn;
 using Tomlyn.Model;
+using WinBackground;
 
 namespace OutOfOffice;
 
@@ -74,8 +75,14 @@ public sealed class Config
     [
         "login_hint", "tenant", "msal_cache", "log_file", "state_file", "time_zone", "enabled", "mode", "days_ahead", "calendar_months_ahead",
         "act_days_before", "working_days", "date_format", "max_days", "every_minutes", "after_unlock_minutes", "notify",
-        "notify_working_days", "window", "leave", "bank_holiday", "conference", "placeholders", "teams", "review",
+        "notify_working_days", "window", "leave", "bank_holiday", "conference", "placeholders", "teams", "review", "schedule",
     ];
+
+    /// <summary>The task's schedule when the settings don't give one: every 15 minutes, at logon and a minute after each unlock.</summary>
+    public static readonly ScheduleSettings ScheduleDefaults = new() { EveryMinutes = 15, AtLogon = true, AfterUnlockMinutes = 1 };
+
+    /// <summary>The schedule keys this tool took at the top level before [schedule] (0.4.0): still read, logged as deprecated.</summary>
+    public static readonly string[] OldScheduleKeys = ["every_minutes", "after_unlock_minutes"];
 
     public required string Path { get; init; }
     public string? LoginHint { get; init; }
@@ -92,8 +99,12 @@ public sealed class Config
         { DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday };
     public string DateFormat { get; init; } = "dddd d MMMM";
     public int MaxDays { get; init; } = 30;
-    public int EveryMinutes { get; init; } = 15;
-    public int? AfterUnlockMinutes { get; init; } = 1;
+    /// <summary>When the task runs ([schedule]; the shared keys are background-tools-lib's ScheduleSettings).</summary>
+    public ScheduleSettings Schedule { get; init; } = ScheduleDefaults;
+    /// <summary>The old top-level schedule keys this file still uses (empty when it uses [schedule]).</summary>
+    public IReadOnlyList<string> DeprecatedScheduleKeys { get; init; } = [];
+    public int EveryMinutes => Schedule.EveryMinutes ?? 15;
+    public int? AfterUnlockMinutes => Schedule.AfterUnlockMinutes > 0 ? Schedule.AfterUnlockMinutes : null;
     public bool Notify { get; init; } = true;
     public int NotifyWorkingDays { get; init; } = 5;
 
@@ -315,6 +326,32 @@ public sealed class Config
         var statusTemplate = Text(teams, "conference_status", "teams.conference_status") ?? "At {event} until {last_day}";
         Message(new TomlTable { ["x"] = statusTemplate }, "x", "teams.conference_status", "");
 
+        var oldScheduleKeys = OldScheduleKeys.Where(raw.ContainsKey).ToList();
+        ScheduleSettings schedule;
+        try
+        {
+            if (raw.TryGetValue("schedule", out var scheduleTable))
+            {
+                if (oldScheduleKeys.Count > 0)
+                    throw Bad($"{string.Join(" and ", oldScheduleKeys)} and [schedule] are both given: keep [schedule] only.");
+                schedule = ScheduleSettings.Parse(scheduleTable as TomlTable ?? throw Bad("schedule should be a [schedule] section."),
+                    ScheduleDefaults, TaskKind.Job, $"{full}: [schedule]");
+            }
+            else
+            {
+                var old = ScheduleDefaults;
+                if (raw.ContainsKey("every_minutes"))
+                    old = old with { EveryMinutes = Whole("every_minutes", 15, 1, 1440) };
+                if (raw.ContainsKey("after_unlock_minutes"))
+                    old = old with { AfterUnlockMinutes = Whole("after_unlock_minutes", 1, 0, 60) };
+                schedule = ScheduleSettings.Parse(null, old, TaskKind.Job, $"{full}: [schedule]");
+            }
+        }
+        catch (FormatException error)
+        {
+            throw new UsageException(error.Message);
+        }
+
         return new Config
         {
             Path = full,
@@ -331,8 +368,8 @@ public sealed class Config
             WorkingDays = days,
             DateFormat = Text(raw, "date_format", "date_format") ?? "dddd d MMMM",
             MaxDays = Whole("max_days", 30, 1, 366),
-            EveryMinutes = Whole("every_minutes", 15, 1, 1440),
-            AfterUnlockMinutes = raw.ContainsKey("after_unlock_minutes") ? Whole("after_unlock_minutes", 1, 0, 60) is var u && u > 0 ? u : null : 1,
+            Schedule = schedule,
+            DeprecatedScheduleKeys = oldScheduleKeys,
             Notify = Flag(raw, "notify", "notify", true),
             NotifyWorkingDays = Whole("notify_working_days", 5, 0, 60),
             On = Clock(window, "on", "window.on", new TimeOnly(17, 30)),

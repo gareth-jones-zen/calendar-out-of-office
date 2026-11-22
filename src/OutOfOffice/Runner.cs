@@ -135,6 +135,14 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             said.Add("Switched off (enabled = false in the settings): nothing done.");
             return said;
         }
+        if (!dryRun && config.DeprecatedScheduleKeys.Count > 0)
+            log($"settings: {string.Join(" and ", config.DeprecatedScheduleKeys)} at the top level are deprecated: move them to [schedule]");
+        if (!dryRun && !config.Schedule.IsActive(host.Now(), out var why))
+        {
+            log($"outside the [schedule] ({why}): nothing done");
+            said.Add($"Outside the [schedule] ({why}): nothing done.");
+            return said;
+        }
         var pic = Look(state);
         pic = Settle(state, pic, dryRun, said);
 

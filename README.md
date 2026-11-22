@@ -43,7 +43,7 @@ optional Teams status message. Your organisation may need to approve MailboxSett
 
 The tool was called `out-of-office` until 0.2.0. It knows the reply it wrote only from its state file (fingerprints of
 what it wrote, and the wording you approved), so move that file with it: unzip 0.2.0 to
-`%LOCALAPPDATA%Programslendar-out-of-office`, point `log_file` and `state_file` at the new names (or move the files),
+`%LOCALAPPDATA%\Programs\calendar-out-of-office`, point `log_file` and `state_file` at the new names (or move the files),
 and check `calendar-out-of-office show` and `plan` say the same as before. Review items keep their `source`; a queued
 item's command still names the old exe, so run the new one. Then delete the old folder (and `out-of-office autostart
 off` first, if it was on).
@@ -117,7 +117,7 @@ messages.
 | `apply <id> [--yes]` | Schedule one period's reply. Without `--yes`, shows it and changes nothing |
 | `clear [--yes] [--force]` | Turn off the reply it wrote; `--force` turns off one it didn't |
 | `run [--dry-run]` | What the scheduled task does |
-| `autostart on\|off\|restart\|status` | The scheduled task: every `every_minutes` (15), at logon, and after unlocking |
+| `autostart on\|off\|restart\|status` | The scheduled task, from `[schedule]` (every 15 minutes, at logon, and a minute after unlocking, by default); `status` says when the settings have changed since it was registered |
 | `sign-in` | Sign in, asking for the permissions it needs |
 | `config` | Create the settings file if it's missing, and say where it is |
 
@@ -143,8 +143,14 @@ date_format = "dddd d MMMM"
 max_days = 30                   # weekdays away; longer is refused as implausible
 notify = true
 notify_working_days = 5         # ask mode: a notification when a period to approve starts this soon
+
+[schedule]                      # when the task runs: background-tools-lib's shared keys (its README, "[schedule]")
 every_minutes = 15
-after_unlock_minutes = 1
+at_logon = true
+after_unlock_minutes = 1        # 0: no run after unlocking
+# hours, days, end_date         # a run outside them does nothing
+# (before 0.4.0, every_minutes and after_unlock_minutes were top-level settings: they still work, logged as
+#  deprecated, but not together with [schedule])
 
 [window]
 on = "17:30"
