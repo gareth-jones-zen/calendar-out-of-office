@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <AssemblyName>out-of-office-background</AssemblyName>
+    <AssemblyName>calendar-out-of-office-background</AssemblyName>
     <RootNamespace>OutOfOffice</RootNamespace>
     <PublishAot>true</PublishAot>
   </PropertyGroup>

@@ -172,7 +172,7 @@ public sealed class GraphOffice(GraphClient graph, TimeZoneInfo zone) : IOffice
         Tenant = config.Tenant,
         LoginHint = config.LoginHint,
         Scopes = CalendarScopes,
-        SignInHint = "At a console, run: out-of-office sign-in",
+        SignInHint = "At a console, run: calendar-out-of-office sign-in",
         Log = Logger.Create(config.LogFile),
     });
 }

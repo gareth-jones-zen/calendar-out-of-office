@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <AssemblyName>out-of-office</AssemblyName>
+    <AssemblyName>calendar-out-of-office</AssemblyName>
     <RootNamespace>OutOfOffice</RootNamespace>
     <PublishAot>true</PublishAot>
   </PropertyGroup>

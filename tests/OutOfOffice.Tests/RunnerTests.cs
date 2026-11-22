@@ -22,7 +22,7 @@ public sealed class RunnerTests : IDisposable
         var item = Assert.Single(w.Items);
         Assert.Equal("proposed", Field(item, "type"));
         Assert.Equal("leave-2027-03-10", Field(item, "period"));
-        Assert.Equal("out-of-office apply leave-2027-03-10 --yes", Field(item, "command"));
+        Assert.Equal("calendar-out-of-office apply leave-2027-03-10 --yes", Field(item, "command"));
         Assert.Equal("Tue 9 Mar 17:30 to Mon 15 Mar 08:00", Field(item, "window"));
         Assert.Contains("Alex Example", Field(item, "internal"));
         Assert.Empty(w.Notified);   // more than five working days ahead

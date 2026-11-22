@@ -24,39 +24,39 @@ public sealed class CliHost
     };
     public Action<string, IEnumerable<string>> Notify { get; init; } = Toast.Notify;
     public Func<ITask> Task { get; init; } = () => new ScheduledTask(Cli.TaskName,
-        "Schedules your Outlook automatic replies from your calendar's leave and conferences (out-of-office run).");
+        "Schedules your Outlook automatic replies from your calendar's leave and conferences (calendar-out-of-office run).");
     public string ProgramDir { get; init; } = AppContext.BaseDirectory;
     public bool Lock { get; init; } = true;
 }
 
-/// <summary>out-of-office: your Outlook automatic replies scheduled from your calendar. Exit codes: 0 done; 1 failed;
+/// <summary>calendar-out-of-office: your Outlook automatic replies scheduled from your calendar. Exit codes: 0 done; 1 failed;
 /// 2 settings, arguments or sign-in.</summary>
 public static class Cli
 {
-    public const string Prog = "out-of-office";
-    public const string TaskName = "out-of-office run";
-    public const string BackgroundExe = "out-of-office-background.exe";
+    public const string Prog = "calendar-out-of-office";
+    public const string TaskName = "calendar-out-of-office run";
+    public const string BackgroundExe = "calendar-out-of-office-background.exe";
 
-    private const string Usage = "usage: out-of-office [-h] [--version] [--config CONFIG] {plan,show,apply,clear,run,autostart,sign-in,config} ...";
+    private const string Usage = "usage: calendar-out-of-office [-h] [--version] [--config CONFIG] {plan,show,apply,clear,run,autostart,sign-in,config} ...";
 
     // Explicit "\n" throughout (a raw literal would take the .cs file's line endings).
     public const string Help =
         Usage + "\n\n" +
-        "out-of-office: your Outlook automatic replies, scheduled from your calendar: leave of a few days or more, and\n" +
+        "calendar-out-of-office: your Outlook automatic replies, scheduled from your calendar: leave of a few days or more, and\n" +
         "conferences, on the evening before and off the morning you're back. Teams shows them too. It never touches a\n" +
         "reply you set yourself, and in ask mode (the default) writes nothing without `apply ... --yes`.\n\n" +
-        "    out-of-office plan                 each period away, its window and messages, and what a run would do\n" +
-        "    out-of-office show                 your automatic replies now, and what out-of-office last wrote\n" +
-        "    out-of-office apply ID [--yes]     schedule one period's reply (without --yes: show it, change nothing)\n" +
-        "    out-of-office clear [--yes]        turn off the reply it wrote (--force: whoever wrote it)\n" +
-        "    out-of-office run [--dry-run]      what the scheduled task does: propose, adjust, or (act mode) write\n" +
-        "    out-of-office autostart on         run every few minutes, at logon and after unlocking (off, restart, status)\n" +
-        "    out-of-office sign-in              sign in to Microsoft, asking for the permissions it needs\n" +
-        "    out-of-office config               create the settings file (if missing) and say where it is\n\n" +
+        "    calendar-out-of-office plan                 each period away, its window and messages, and what a run would do\n" +
+        "    calendar-out-of-office show                 your automatic replies now, and what calendar-out-of-office last wrote\n" +
+        "    calendar-out-of-office apply ID [--yes]     schedule one period's reply (without --yes: show it, change nothing)\n" +
+        "    calendar-out-of-office clear [--yes]        turn off the reply it wrote (--force: whoever wrote it)\n" +
+        "    calendar-out-of-office run [--dry-run]      what the scheduled task does: propose, adjust, or (act mode) write\n" +
+        "    calendar-out-of-office autostart on         run every few minutes, at logon and after unlocking (off, restart, status)\n" +
+        "    calendar-out-of-office sign-in              sign in to Microsoft, asking for the permissions it needs\n" +
+        "    calendar-out-of-office config               create the settings file (if missing) and say where it is\n\n" +
         "options:\n" +
         "  -h, --help       show this help message and exit\n" +
         "  --version        show program's version number and exit\n" +
-        "  --config CONFIG  settings file (default %APPDATA%\\out-of-office\\config.toml)\n";
+        "  --config CONFIG  settings file (default %APPDATA%\\calendar-out-of-office\\config.toml)\n";
 
     private static readonly string[] Commands = ["plan", "show", "apply", "clear", "run", "autostart", "sign-in", "config"];
 
@@ -111,7 +111,7 @@ public static class Cli
                 case "autostart":
                     return Autostart(config, options.Args[0], host);
             }
-            using var held = host.Lock ? Locks.Exclusive("out-of-office-" + Locks.Key(config.Path), 300) : null;
+            using var held = host.Lock ? Locks.Exclusive("calendar-out-of-office-" + Locks.Key(config.Path), 300) : null;
             var office = host.Office(config);
             var runner = new Runner(config, office, host);
             var state = State.Load(config.StateFile);
@@ -159,7 +159,7 @@ public static class Cli
     {
         var pic = runner.Look(state);
         host.Out.WriteLine($"Mode: {config.Mode.ToString().ToLowerInvariant()}. Automatic replies now: {pic.Setting.Status} ({runner.SettingWindow(pic.Setting)})"
-                           + pic.Owner switch { Owner.Ours => ", written by out-of-office.", Owner.Theirs => ", set outside out-of-office (left alone).", _ => "." });
+                           + pic.Owner switch { Owner.Ours => ", written by calendar-out-of-office.", Owner.Theirs => ", set outside calendar-out-of-office (left alone).", _ => "." });
         if (pic.Periods.Count == 0)
             host.Out.WriteLine($"No leave or conference in the next {config.DaysAhead} days that needs a reply.");
         foreach (var p in pic.Periods)
@@ -175,7 +175,7 @@ public static class Cli
             host.Out.WriteLine(line);
         host.Out.WriteLine(office.CanWrite()
             ? "Writing is possible (MailboxSettings.ReadWrite is in the sign-in)."
-            : "A write would need MailboxSettings.ReadWrite, which the sign-in doesn't have yet (`out-of-office sign-in`; your organisation may need to approve it).");
+            : "A write would need MailboxSettings.ReadWrite, which the sign-in doesn't have yet (`calendar-out-of-office sign-in`; your organisation may need to approve it).");
         return 0;
     }
 
@@ -194,7 +194,7 @@ public static class Cli
         var pic = runner.Look(state);
         var s = pic.Setting;
         host.Out.WriteLine($"Automatic replies: {s.Status} ({runner.SettingWindow(s)})"
-                           + pic.Owner switch { Owner.Ours => ", written by out-of-office", Owner.Theirs => ", set outside out-of-office", _ => "" });
+                           + pic.Owner switch { Owner.Ours => ", written by calendar-out-of-office", Owner.Theirs => ", set outside calendar-out-of-office", _ => "" });
         if (s.Status != "disabled" || s.Internal.Length > 0)
         {
             host.Out.WriteLine($"  external to   {s.Audience}");
@@ -202,7 +202,7 @@ public static class Cli
             host.Out.WriteLine($"  external      {Planner.Plain(s.External)}");
         }
         if (state["written"] is JsonObject w)
-            host.Out.WriteLine($"Last written by out-of-office: {w["period"]} at {w["at"]} (UTC).");
+            host.Out.WriteLine($"Last written by calendar-out-of-office: {w["period"]} at {w["at"]} (UTC).");
         if (state["writing"] is JsonObject wr)
             host.Out.WriteLine($"A write for {wr["period"]} hasn't been confirmed yet; the next run reads it back.");
         return 0;
@@ -221,7 +221,7 @@ public static class Cli
             if (state["failure_notified"] is null && (failures >= 3 || error is SignInNeededException))
             {
                 if (config.Notify)
-                    host.Notify("out-of-office couldn't run", [error.Message, $"Log: {config.LogFile}"]);
+                    host.Notify("calendar-out-of-office couldn't run", [error.Message, $"Log: {config.LogFile}"]);
                 state["failure_notified"] = State.Stamp(host.Now());
             }
             State.Save(config.StateFile, state);
@@ -246,7 +246,7 @@ public static class Cli
         {
             case "on":
                 var background = Path.Combine(host.ProgramDir, BackgroundExe);
-                var exe = File.Exists(background) ? background : Path.Combine(host.ProgramDir, "out-of-office.exe");
+                var exe = File.Exists(background) ? background : Path.Combine(host.ProgramDir, "calendar-out-of-office.exe");
                 var schedule = new TaskSchedule
                 {
                     AtLogon = true,
@@ -277,7 +277,7 @@ public static class Cli
             default:
                 var info = task.Status();
                 if (info is null)
-                    host.Out.WriteLine("Autostart is off. `out-of-office autostart on` turns it on.");
+                    host.Out.WriteLine("Autostart is off. `calendar-out-of-office autostart on` turns it on.");
                 else
                 {
                     host.Out.WriteLine($"Autostart is on ('{TaskName}').");
@@ -349,7 +349,7 @@ public static class Cli
         if (options.Command == "autostart" && options.Args.Count == 0)
             throw new ArgumentsException("the following arguments are required: action");
         if (options.Command == "apply" && options.Args.Count == 0)
-            throw new ArgumentsException("the following arguments are required: id (from `out-of-office plan`)");
+            throw new ArgumentsException("the following arguments are required: id (from `calendar-out-of-office plan`)");
         if (options.Args.Count > max)
             throw new ArgumentsException($"unrecognized arguments: {string.Join(" ", options.Args.Skip(max))}");
         if (options.Command == "autostart" && options.Args[0] is not ("on" or "off" or "restart" or "status"))

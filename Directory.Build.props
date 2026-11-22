@@ -7,10 +7,10 @@
     <LangVersion>latest</LangVersion>
     <InvariantGlobalization>true</InvariantGlobalization>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <Version>0.1.0-dev</Version>
+    <Version>0.2.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Authors>Gareth Jones</Authors>
-    <RepositoryUrl>https://github.com/gareth-jones-zen/out-of-office</RepositoryUrl>
+    <RepositoryUrl>https://github.com/gareth-jones-zen/calendar-out-of-office</RepositoryUrl>
     <!-- The shared libraries are a sibling checkout of gareth-jones-zen/background-tools-lib (CI checks it out
          beside this repo). -->
     <BackgroundToolsLib>$(MSBuildThisFileDirectory)..\background-tools-lib\</BackgroundToolsLib>

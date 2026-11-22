@@ -1,4 +1,4 @@
-# out-of-office
+# calendar-out-of-office
 
 Schedules your Outlook automatic replies from your calendar: when you're on leave for a few days or more, or at a
 conference, the reply goes on the evening before and off the morning you're back, with the dates filled in for you.
@@ -6,7 +6,7 @@ Teams shows you as Out of office for the same window, with the same message, wit
 touches a reply you set yourself, and by default writes nothing until you've seen it and said yes.
 
 ```
-out-of-office plan
+calendar-out-of-office plan
 ```
 
 ```
@@ -19,7 +19,7 @@ leave-2027-03-10: leave from Wednesday 10 March, back Monday 15 March (3 weekday
   external  I'm on leave and back on Monday 15 March; I'll reply to your message when I return.
   days      Wed 10: leave, Thu 11: leave, Fri 12: leave, Sat 13: weekend, Sun 14: weekend
 
-leave-2027-03-10: to ask about: Tue 9 Mar 17:30 to Mon 15 Mar 08:00. `out-of-office apply leave-2027-03-10 --yes` schedules it.
+leave-2027-03-10: to ask about: Tue 9 Mar 17:30 to Mon 15 Mar 08:00. `calendar-out-of-office apply leave-2027-03-10 --yes` schedules it.
 Writing is possible (MailboxSettings.ReadWrite is in the sign-in).
 ```
 
@@ -27,17 +27,26 @@ Writing is possible (MailboxSettings.ReadWrite is in the sign-in).
 
 Windows (x64) only; nothing else is needed.
 
-1. Download `out-of-office-<version>-win-x64.zip` from [Releases](https://github.com/gareth-jones-zen/out-of-office/releases).
-2. Unzip it to a folder that will stay put, such as `%LOCALAPPDATA%\Programs\out-of-office`.
-3. `out-of-office config` creates the settings file; write your messages. `out-of-office sign-in` signs you in (once).
-4. `out-of-office plan` shows each period and its messages; `out-of-office apply <id> --yes` schedules one;
-   `out-of-office autostart on` keeps watching (every 15 minutes, at logon and a minute after each unlock), asking
+1. Download `calendar-out-of-office-<version>-win-x64.zip` from [Releases](https://github.com/gareth-jones-zen/calendar-out-of-office/releases).
+2. Unzip it to a folder that will stay put, such as `%LOCALAPPDATA%\Programs\calendar-out-of-office`.
+3. `calendar-out-of-office config` creates the settings file; write your messages. `calendar-out-of-office sign-in` signs you in (once).
+4. `calendar-out-of-office plan` shows each period and its messages; `calendar-out-of-office apply <id> --yes` schedules one;
+   `calendar-out-of-office autostart on` keeps watching (every 15 minutes, at logon and a minute after each unlock), asking
    about each new period and following changes to ones it has written.
 
 **Permissions** (Microsoft's "Graph Command Line Tools" app; `sign-in` asks for them): Calendars.ReadWrite and
 MailboxSettings.Read to read; **MailboxSettings.ReadWrite to schedule a reply**, and Presence.ReadWrite only for the
 optional Teams status message. Your organisation may need to approve MailboxSettings.ReadWrite; until then `plan`,
 `show` and `run` in ask mode work, and `plan` says a write isn't possible yet.
+
+### Upgrading from out-of-office (0.1.x)
+
+The tool was called `out-of-office` until 0.2.0. It knows the reply it wrote only from its state file (fingerprints of
+what it wrote, and the wording you approved), so move that file with it: unzip 0.2.0 to
+`%LOCALAPPDATA%Programslendar-out-of-office`, point `log_file` and `state_file` at the new names (or move the files),
+and check `calendar-out-of-office show` and `plan` say the same as before. Review items keep their `source`; a queued
+item's command still names the old exe, so run the new one. Then delete the old folder (and `out-of-office autostart
+off` first, if it was on).
 
 ## How a period is found
 
@@ -104,7 +113,7 @@ messages.
 | Command | What it does |
 |---|---|
 | `plan` | Each period: why, the window, both messages, the days; then what a run would do, and whether a write is possible. Reads only |
-| `show` | Your automatic replies now, and what out-of-office last wrote |
+| `show` | Your automatic replies now, and what calendar-out-of-office last wrote |
 | `apply <id> [--yes]` | Schedule one period's reply. Without `--yes`, shows it and changes nothing |
 | `clear [--yes] [--force]` | Turn off the reply it wrote; `--force` turns off one it didn't |
 | `run [--dry-run]` | What the scheduled task does |
@@ -116,13 +125,13 @@ Exit codes: 0 done; 1 failed; 2 settings, arguments or sign-in (including a writ
 
 ## Settings
 
-`out-of-office config` writes a starting file (`%APPDATA%\out-of-office\config.toml`, or `--config`). Every key:
+`calendar-out-of-office config` writes a starting file (`%APPDATA%\calendar-out-of-office\config.toml`, or `--config`). Every key:
 
 ```toml
 # base = "base-config.toml"     # settings shared with other tools (login_hint, tenant, msal_cache, time_zone, [paths])
 time_zone = "GMT Standard Time"
-log_file = "%LOCALAPPDATA%/out-of-office/out-of-office.log"
-state_file = "%LOCALAPPDATA%/out-of-office/state.json"
+log_file = "%LOCALAPPDATA%/calendar-out-of-office/calendar-out-of-office.log"
+state_file = "%LOCALAPPDATA%/calendar-out-of-office/state.json"
 enabled = true
 mode = "ask"                    # ask | act
 days_ahead = 42                 # how far ahead it looks
@@ -179,11 +188,11 @@ conference_status = "At {event} until {last_day}"
 
 # [review]
 # file = "%LOCALAPPDATA%/review/pending.json"
-# source = "out-of-office"
+# source = "calendar-out-of-office"
 ```
 
 **Teams:** while a scheduled reply is on, Teams shows you as Out of office with the internal message; nothing more is
-needed for leave. Graph can't set Out of office presence itself, and out-of-office never sets a preferred presence.
+needed for leave. Graph can't set Out of office presence itself, and calendar-out-of-office never sets a preferred presence.
 The optional status message is for a conference you'd rather show as a note than as Out of office.
 
 ## Not verified against a real mailbox yet

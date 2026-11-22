@@ -37,7 +37,7 @@ public sealed class Config
 
     // Explicit "\n" (a raw literal would take the .cs file's line endings), written with CRLF.
     public const string Template =
-        "# out-of-office settings. See the README.\n" +
+        "# calendar-out-of-office settings. See the README.\n" +
         "# base = \"base-config.toml\"        # settings shared with other tools\n" +
         "# login_hint = \"you@example.com\"\n" +
         "# tenant = \"organizations\"          # or your organisation's tenant id\n" +
@@ -128,14 +128,14 @@ public sealed class Config
     {
         env ??= Environment;
         var local = env("LOCALAPPDATA");
-        return PyPath.Pure(System.IO.Path.Combine(string.IsNullOrEmpty(local) ? PyPath.Home(env) : local, "out-of-office"));
+        return PyPath.Pure(System.IO.Path.Combine(string.IsNullOrEmpty(local) ? PyPath.Home(env) : local, "calendar-out-of-office"));
     }
 
     public static string DefaultPath(Func<string, string?>? env = null)
     {
         env ??= Environment;
         var appData = env("APPDATA");
-        return PyPath.Pure(System.IO.Path.Combine(string.IsNullOrEmpty(appData) ? PyPath.Home(env) : appData, "out-of-office", "config.toml"));
+        return PyPath.Pure(System.IO.Path.Combine(string.IsNullOrEmpty(appData) ? PyPath.Home(env) : appData, "calendar-out-of-office", "config.toml"));
     }
 
     public static Config Load(string? path = null, Func<string, string?>? env = null)
@@ -144,7 +144,7 @@ public sealed class Config
         var given = !string.IsNullOrEmpty(path) ? path : env(EnvConfig) is { Length: > 0 } fromEnv ? fromEnv : DefaultPath(env);
         var full = PyPath.Resolve(given);
         if (!File.Exists(full))
-            throw new UsageException($"No settings file at {full}. Run `out-of-office config` to create one.");
+            throw new UsageException($"No settings file at {full}. Run `calendar-out-of-office config` to create one.");
         TomlTable raw;
         try
         {
@@ -263,7 +263,7 @@ public sealed class Config
         foreach (var (key, value) in Section("placeholders"))
         {
             if (BuiltIn.Contains(key))
-                throw Bad($"placeholders.{key} is filled in by out-of-office itself; choose another name.");
+                throw Bad($"placeholders.{key} is filled in by calendar-out-of-office itself; choose another name.");
             placeholders[key] = value as string ?? throw Bad($"placeholders.{key} should be text.");
         }
         var known = BuiltIn.Concat(placeholders.Keys).ToHashSet();
@@ -306,7 +306,7 @@ public sealed class Config
             LoginHint = Text(raw, "login_hint", "login_hint"),
             Tenant = Text(raw, "tenant", "tenant") ?? "organizations",
             MsalCache = Text(raw, "msal_cache", "msal_cache") is { } cache ? PathSetting(cache) : null,
-            LogFile = Text(raw, "log_file", "log_file") is { } log ? PathSetting(log) : PyPath.Pure(System.IO.Path.Combine(Local(env), "out-of-office.log")),
+            LogFile = Text(raw, "log_file", "log_file") is { } log ? PathSetting(log) : PyPath.Pure(System.IO.Path.Combine(Local(env), "calendar-out-of-office.log")),
             StateFile = Text(raw, "state_file", "state_file") is { } state ? PathSetting(state) : PyPath.Pure(System.IO.Path.Combine(Local(env), "state.json")),
             TimeZone = zone,
             Enabled = Flag(raw, "enabled", "enabled", true),

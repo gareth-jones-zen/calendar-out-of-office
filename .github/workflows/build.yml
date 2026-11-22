@@ -13,23 +13,23 @@ jobs:
       # The shared libraries are a sibling checkout (Directory.Build.props: ..\background-tools-lib).
       - uses: actions/checkout@v5
         with:
-          path: out-of-office
+          path: calendar-out-of-office
       - uses: actions/checkout@v5
         with:
           repository: gareth-jones-zen/background-tools-lib
           path: background-tools-lib
       - uses: actions/setup-dotnet@v5
         with:
-          global-json-file: out-of-office/global.json
+          global-json-file: calendar-out-of-office/global.json
       - name: Build and test
-        working-directory: out-of-office
+        working-directory: calendar-out-of-office
         run: dotnet test -c Release
       - name: Publish (Native AOT)
-        working-directory: out-of-office
+        working-directory: calendar-out-of-office
         run: |
           dotnet publish src/OutOfOffice.Console -c Release -r win-x64 -o out
           Get-ChildItem out/*.exe | Format-Table Name, Length
       - uses: actions/upload-artifact@v4
         with:
-          name: out-of-office-win-x64
-          path: out-of-office/out/*.exe
+          name: calendar-out-of-office-win-x64
+          path: calendar-out-of-office/out/*.exe

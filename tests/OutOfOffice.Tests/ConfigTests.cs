@@ -17,7 +17,7 @@ public sealed class ConfigTests
     [Fact]
     public void A_placeholder_cant_reuse_a_built_in_name()
     {
-        Assert.Contains("filled in by out-of-office", Error(World.Base.Replace("cover = \"Alex Example\"", "return_day = \"never\"")));
+        Assert.Contains("filled in by calendar-out-of-office", Error(World.Base.Replace("cover = \"Alex Example\"", "return_day = \"never\"")));
     }
 
     [Fact]

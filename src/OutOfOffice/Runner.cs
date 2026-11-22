@@ -5,13 +5,15 @@ using ReviewQueue;
 
 namespace OutOfOffice;
 
-/// <summary>What the mailbox's reply is, as far as out-of-office is concerned.</summary>
+/// <summary>What the mailbox's reply is, as far as calendar-out-of-office is concerned.</summary>
 public enum Owner { Idle, Ours, Theirs }
 
 /// <summary>Everything a run, plan, apply or clear works from: the periods ahead, the setting now, and whose it is.</summary>
 public sealed record Picture(List<Period> Periods, Setting Setting, Owner Owner, JsonObject? Written, DateTime Now, DateTime NowUtc);
 
-/// <summary>The state file: what out-of-office wrote (as fingerprints and times, never the messages), what it has raised,
+// The state file is the only record of which reply is ours (no marker is written to the mailbox): an upgrade or rename must
+// carry it over, or a reply written before is treated as set by hand and left alone.
+/// <summary>The state file: what calendar-out-of-office wrote (as fingerprints and times, never the messages), what it has raised,
 /// and which messages have been approved. Small, so a backup of it holds nothing personal.</summary>
 public static class State
 {
@@ -146,12 +148,12 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             else
             {
                 said.Add(pic.Setting.Idle(pic.NowUtc)
-                    ? $"The reply for {id} was turned off outside out-of-office: left off, and that period is yours now."
-                    : $"The reply for {id} was changed outside out-of-office: left as it is, and that period is yours now.");
+                    ? $"The reply for {id} was turned off outside calendar-out-of-office: left off, and that period is yours now."
+                    : $"The reply for {id} was changed outside calendar-out-of-office: left as it is, and that period is yours now.");
                 if (!dryRun)
                 {
                     State.Table(state, "hands_off")[id] = State.Stamp(pic.NowUtc);
-                    Raise("changed", $"Out of office: your reply for {id} was changed by hand", id, null, "Nothing to do: out-of-office won't touch that period again.");
+                    Raise("changed", $"Out of office: your reply for {id} was changed by hand", id, null, "Nothing to do: calendar-out-of-office won't touch that period again.");
                 }
             }
             if (!dryRun)
@@ -203,7 +205,7 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
         {
             state.Remove("writing");
             Raise("failed", $"Out of office: a write for {id} can't be confirmed", id, null,
-                "Check your automatic replies in Outlook (`out-of-office show`); nothing more is written for this period.");
+                "Check your automatic replies in Outlook (`calendar-out-of-office show`); nothing more is written for this period.");
         }
         return pic;
     }
@@ -253,11 +255,11 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
         }
     }
 
-    /// <summary>A reply out-of-office didn't write: never touched; raised once.</summary>
+    /// <summary>A reply calendar-out-of-office didn't write: never touched; raised once.</summary>
     private void Theirs(JsonObject state, Picture pic, bool dryRun, List<string> said)
     {
         var fp = pic.Setting.Fingerprint();
-        said.Add($"Your automatic replies are {pic.Setting.Status} ({SettingWindow(pic.Setting)}), set outside out-of-office: left alone.");
+        said.Add($"Your automatic replies are {pic.Setting.Status} ({SettingWindow(pic.Setting)}), set outside calendar-out-of-office: left alone.");
         var next = pic.Periods.FirstOrDefault(p => Refused(p, state) is null);
         if (next is not null)
             said.Add($"{next.Id}: waits until that's off ({Window(Want(next, pic))}).");
@@ -267,7 +269,7 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
         if (next is not null)
         {
             Raise("hand-set", $"Out of office: a reply you set is on, so {next.Id} wasn't scheduled", next.Id, null,
-                "Your own automatic reply is left alone. When it's off, `out-of-office plan` shows the next one; or `out-of-office clear --force --yes` turns yours off.");
+                "Your own automatic reply is left alone. When it's off, `calendar-out-of-office plan` shows the next one; or `calendar-out-of-office clear --force --yes` turns yours off.");
             NotifyOnce(state, "hand-set:" + fp, "Out of office: your own automatic reply is on",
                 [$"So {next.Id} wasn't scheduled. Nothing was changed."]);
         }
@@ -321,7 +323,7 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             return;
         }
         said.Add($"{next.Id}: to ask about{(config.Mode == Mode.Act ? " (act mode, but these messages haven't been approved yet)" : "")}: {Window(want)}. "
-                 + $"`out-of-office apply {next.Id} --yes` schedules it.");
+                 + $"`calendar-out-of-office apply {next.Id} --yes` schedules it.");
         if (!dryRun)
             Propose(state, next, want, pic);
     }
@@ -338,11 +340,11 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
         {
             raised[p.Id] = fp;
             Raise(Item, $"Out of office: schedule your reply for {Describe(p)}?", p.Id, want,
-                $"Check the dates and both messages, then `out-of-office apply {p.Id} --yes` (on your OK only).");
+                $"Check the dates and both messages, then `calendar-out-of-office apply {p.Id} --yes` (on your OK only).");
         }
         if (WorkingDaysUntil(DateOnly.FromDateTime(pic.Now), DateOnly.FromDateTime(p.On)) <= config.NotifyWorkingDays)
             NotifyOnce(state, "proposed:" + p.Id, "Out of office: a reply to approve",
-                [$"{Describe(p)}: {Window(want)}.", $"out-of-office apply {p.Id} --yes"]);
+                [$"{Describe(p)}: {Window(want)}.", $"calendar-out-of-office apply {p.Id} --yes"]);
     }
 
     private int WorkingDaysUntil(DateOnly from, DateOnly to)
@@ -359,24 +361,24 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
     {
         var pic = Look(state);
         var p = pic.Periods.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase))
-                ?? throw new UsageException($"No period '{id}' in the next {config.DaysAhead} days. `out-of-office plan` lists them.");
+                ?? throw new UsageException($"No period '{id}' in the next {config.DaysAhead} days. `calendar-out-of-office plan` lists them.");
         if (Refused(p, state) is { } why && !why.StartsWith("you changed", StringComparison.Ordinal))
             throw new UsageException($"{p.Id} can't be scheduled: {why}.");
         if (pic.Owner == Owner.Theirs)
-            throw new UsageException($"Your automatic replies are {pic.Setting.Status} ({SettingWindow(pic.Setting)}), set outside out-of-office, so nothing was written. Turn yours off first (in Outlook, or `out-of-office clear --force --yes`).");
+            throw new UsageException($"Your automatic replies are {pic.Setting.Status} ({SettingWindow(pic.Setting)}), set outside calendar-out-of-office, so nothing was written. Turn yours off first (in Outlook, or `calendar-out-of-office clear --force --yes`).");
         var keep = pic.Owner == Owner.Ours && Holding(pic)?.Id == p.Id && State.Time(pic.Written!["start"]) is { } s && s <= pic.NowUtc ? s : (DateTime?)null;
         if (pic.Owner == Owner.Ours && Holding(pic)?.Id != p.Id)
-            throw new UsageException($"The reply for {pic.Written!["period"]} is on; only one can be scheduled at a time. `out-of-office clear --yes` turns it off first.");
+            throw new UsageException($"The reply for {pic.Written!["period"]} is on; only one can be scheduled at a time. `calendar-out-of-office clear --yes` turns it off first.");
         var want = Want(p, pic, keep);
         host.Out.WriteLine(Preview(p, want));
         if (!yes)
         {
-            host.Out.WriteLine($"\nNothing written. `out-of-office apply {p.Id} --yes` schedules it.");
+            host.Out.WriteLine($"\nNothing written. `calendar-out-of-office apply {p.Id} --yes` schedules it.");
             return 0;
         }
         if (!office.CanWrite())
             throw new SignInNeededException("Scheduling a reply needs the MailboxSettings.ReadWrite permission, which this sign-in doesn't have yet. "
-                                            + "Run `out-of-office sign-in` at a console (your organisation may need to approve it first).");
+                                            + "Run `calendar-out-of-office sign-in` at a console (your organisation may need to approve it first).");
         Write(state, pic, p.Id, want, p, keepStart: keep is not null);
         State.Approve(state, Planner.TemplateHash(config, p.IsLeave));
         State.Table(state, "hands_off").Remove(p.Id);
@@ -386,7 +388,7 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
         return 0;
     }
 
-    /// <summary>Clear: turn off the reply out-of-office wrote; another one only with force.</summary>
+    /// <summary>Clear: turn off the reply calendar-out-of-office wrote; another one only with force.</summary>
     public int Clear(JsonObject state, bool yes, bool force)
     {
         var pic = Look(state);
@@ -396,7 +398,7 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             return 0;
         }
         if (pic.Owner == Owner.Theirs && !force)
-            throw new UsageException($"The reply that's on ({pic.Setting.Status}, {SettingWindow(pic.Setting)}) wasn't written by out-of-office, so it's left alone. --force turns it off anyway.");
+            throw new UsageException($"The reply that's on ({pic.Setting.Status}, {SettingWindow(pic.Setting)}) wasn't written by calendar-out-of-office, so it's left alone. --force turns it off anyway.");
         host.Out.WriteLine($"Would turn off: {pic.Setting.Status}, {SettingWindow(pic.Setting)}.");
         if (!yes)
         {
@@ -512,7 +514,7 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             fields["internal"] = Planner.Plain(reply.Internal);
             fields["external"] = Planner.Plain(reply.External);
             fields["audience"] = reply.Audience;
-            fields["command"] = $"out-of-office apply {period} --yes";
+            fields["command"] = $"calendar-out-of-office apply {period} --yes";
         }
         queue.Add(review.Source, type, fields);
     }

@@ -64,7 +64,7 @@ internal sealed class FakeOffice : IOffice
 /// <summary>A settings file, a fake office and a clock, in a folder of their own.</summary>
 internal sealed class World : IDisposable
 {
-    public string Dir { get; } = Path.Combine(Path.GetTempPath(), "out-of-office-tests-" + Guid.NewGuid().ToString("N"));
+    public string Dir { get; } = Path.Combine(Path.GetTempPath(), "calendar-out-of-office-tests-" + Guid.NewGuid().ToString("N"));
     public FakeOffice Office { get; } = new();
     public DateTime Now { get; set; } = new(2027, 3, 1, 9, 0, 0);   // a Monday
     public List<string> Notified { get; } = [];
@@ -93,7 +93,7 @@ internal sealed class World : IDisposable
         cover = "Alex Example"
         [review]
         file = "pending.json"
-        source = "out-of-office"
+        source = "calendar-out-of-office"
         """;
 
     public World(string? extra = null, string settings = Base)
