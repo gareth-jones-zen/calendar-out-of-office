@@ -83,13 +83,18 @@ public sealed class GraphOffice(GraphClient graph, TimeZoneInfo zone) : IOffice
         };
         if (!keepStart)
             setting["scheduledStartDateTime"] = Stamp(reply.StartUtc);
-        graph.RequestAsync("/me/mailboxSettings", HttpMethod.Patch, new JsonObject { ["automaticRepliesSetting"] = setting }, WriteScopes)
-            .GetAwaiter().GetResult();
+        // Sent once: an automatic reply answers people, so a write that may have landed is never repeated blind.
+        // A 5xx, a timeout or a dropped connection after sending throws GraphDeliveryUnknownException, and
+        // Runner.Write reads the setting back to see whether it landed.
+        graph.RequestAsync("/me/mailboxSettings", HttpMethod.Patch, new JsonObject { ["automaticRepliesSetting"] = setting }, WriteScopes,
+            policy: GraphRetryPolicy.Write).GetAwaiter().GetResult();
     }
 
+    /// <summary>Sent once and read back, as <see cref="Schedule"/>.</summary>
     public void Disable() =>
         graph.RequestAsync("/me/mailboxSettings", HttpMethod.Patch,
-            new JsonObject { ["automaticRepliesSetting"] = new JsonObject { ["status"] = "disabled" } }, WriteScopes).GetAwaiter().GetResult();
+            new JsonObject { ["automaticRepliesSetting"] = new JsonObject { ["status"] = "disabled" } }, WriteScopes,
+            policy: GraphRetryPolicy.Write).GetAwaiter().GetResult();
 
     public bool CanWrite()
     {
@@ -111,8 +116,9 @@ public sealed class GraphOffice(GraphClient graph, TimeZoneInfo zone) : IOffice
         var message = new JsonObject { ["message"] = new JsonObject { ["content"] = text ?? "", ["contentType"] = "text" } };
         if (text is not null && untilUtc is { } until)
             message["expiryDateTime"] = Stamp(until);
+        // Retried as a read: setting the same status message again notifies nobody and leaves the same message.
         graph.RequestAsync($"/users/{Uri.EscapeDataString(id)}/presence/setStatusMessage", HttpMethod.Post,
-            new JsonObject { ["statusMessage"] = message }, PresenceScopes).GetAwaiter().GetResult();
+            new JsonObject { ["statusMessage"] = message }, PresenceScopes, policy: GraphRetryPolicy.Read).GetAwaiter().GetResult();
     }
 
     private static JsonObject Stamp(DateTime utc) => new()

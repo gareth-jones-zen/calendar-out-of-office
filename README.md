@@ -98,8 +98,12 @@ blank line, lines within a paragraph joined. They're escaped and sent as HTML. *
 | A period it wrote is no longer in the calendar | **Turned off, and you're told** |
 | A reply you set yourself (in Outlook or Teams) is on | **Left alone**; raised once, and the next period waits. `clear --force --yes` turns it off |
 | You change or turn off a reply it wrote | It's yours from then on: no more writes for that period |
-| A write whose answer was lost | **Settled by reading back**, never by writing blind: recorded if it landed; one more try if the mailbox still holds what was there; otherwise raised |
+| A write whose answer was lost (a 5xx, a timeout or a dropped connection after sending) | **Never sent again; settled by reading back**: recorded if it landed; if the mailbox still holds what was there, one more try on a later run, only after reading back again; otherwise a `failed` review item ("can't be confirmed": check your automatic replies) |
 | Implausible (more than `max_days` weekdays) or its end not known yet | Not written; `plan` says why |
+
+**Graph calls:** reads are retried (a throttle, a 5xx, a dropped connection). **The automatic-reply write is sent
+once**, because a reply answers people: only a throttle (429) or a request that never connected is sent again. The Teams
+status message is retried like a read, because setting the same message again notifies nobody.
 
 **Notifications** only for something that needs you (a period to approve soon, your own reply in the way) or a failure
 (the third in a row, or at once for a sign-in). Success is silent. Review items go to the queue named in `[review]`

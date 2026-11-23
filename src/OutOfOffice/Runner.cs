@@ -469,7 +469,20 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             failure = error;
         }
 
-        var back = office.Read();
+        // A write sent once whose answer was a 5xx or never came (GraphDeliveryUnknownException) may or may not have
+        // landed: this read says which, and it's never resent blind.
+        var unknown = failure is GraphDeliveryUnknownException;
+        Setting back;
+        try
+        {
+            back = office.Read();
+        }
+        catch (Exception error) when (failure is not null && error is not SignInNeededException)
+        {
+            // "writing" is saved, so the next run reads it back before writing anything.
+            throw new InvalidOperationException($"The write for {id} {(unknown ? "may or may not have landed" : "failed")} ({failure.Message}), "
+                                                + $"and reading it back failed too ({error.Message}); the next run reads it back before writing anything.", error);
+        }
         var now = back.Idle(pic.NowUtc) ? "idle" : back.Fingerprint();
         var statusOnly = period is { IsLeave: false } && config.ConferenceAction == ConferenceAction.Status;
         if (now == expected || statusOnly)
@@ -490,12 +503,19 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
         else if (failure is not null && now == previous)
         {
             State.Save(config.StateFile, state);
-            throw new InvalidOperationException($"The write for {id} didn't land ({failure.Message}); it may be made once more.", failure);
+            // Not there when read back. Making it once more (on a later run, after reading back again) is safe: it
+            // sets the same reply, and a write that lands late is found by that read and recorded, not repeated.
+            throw new InvalidOperationException(unknown
+                ? $"Microsoft didn't confirm the write for {id} ({failure.Message}) and the mailbox doesn't show it; "
+                  + "the next run reads it back again, and it may be made once more only if it still isn't there."
+                : $"The write for {id} didn't land ({failure.Message}); it may be made once more.", failure);
         }
         else
         {
             state.Remove("writing");
             State.Save(config.StateFile, state);
+            Raise("failed", $"Out of office: a write for {id} can't be confirmed", id, null,
+                "Check your automatic replies in Outlook (`calendar-out-of-office show`); nothing more is written for this period.");
             throw new InvalidOperationException($"After writing {id}, the mailbox holds something else; nothing more is written for it."
                                                 + (failure is null ? "" : $" ({failure.Message})"));
         }
