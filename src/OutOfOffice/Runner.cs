@@ -9,7 +9,34 @@ namespace OutOfOffice;
 public enum Owner { Idle, Ours, Theirs }
 
 /// <summary>Everything a run, plan, apply or clear works from: the periods ahead, the setting now, and whose it is.</summary>
-public sealed record Picture(List<Period> Periods, Setting Setting, Owner Owner, JsonObject? Written, DateTime Now, DateTime NowUtc);
+public sealed record Picture(List<Period> Periods, Setting Setting, Owner Owner, JsonObject? Written, DateTime Now, DateTime NowUtc,
+    IReadOnlyDictionary<string, Audience> Audiences);
+
+/// <summary>Who outside gets a period's reply, and where that came from: chosen for the period (`apply
+/// --external-audience`, or `audience` ahead of time), perhaps carried from the id it had before its first day moved;
+/// or the settings' for its kind.</summary>
+public sealed record Audience(string Value, string Settings, bool Chosen = false, string? CarriedFrom = null)
+{
+    public static string Words(string value) => value switch
+    {
+        "all" => "everyone",
+        "contactsOnly" => "your contacts only",
+        "none" => "no one",
+        _ => value,
+    };
+
+    /// <summary>"your contacts only (chosen for this period; the settings say everyone)".</summary>
+    public string Describe()
+    {
+        if (!Chosen)
+            return $"{Words(Value)} (the settings)";
+        var source = CarriedFrom is { } from ? $"chosen for {from}, carried over when the first day moved" : "chosen for this period";
+        return $"{Words(Value)} ({source}{(Value == Settings ? "" : $"; the settings say {Words(Settings)}")})";
+    }
+
+    /// <summary>A value as Graph spells it (none, contactsOnly, all), any case; null if it isn't one.</summary>
+    public static string? Parse(string text) => Config.Audiences.FirstOrDefault(a => a.Equals(text, StringComparison.OrdinalIgnoreCase));
+}
 
 // The state file is the only record of which reply is ours (no marker is written to the mailbox): an upgrade or rename must
 // carry it over, or a reply written before is treated as set by hand and left alone.
@@ -46,6 +73,26 @@ public static class State
         node is JsonValue v && v.TryGetValue<string>(out var s)
             && DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var t)
             ? DateTime.SpecifyKind(t, DateTimeKind.Utc) : null;
+
+    /// <summary>A period's chosen audience as kept in the state's "audience" table: the value and the period's first and
+    /// last days, so a choice can follow a period whose first day (and so its id) moves.</summary>
+    public static JsonObject Choice(string audience, Period p)
+    {
+        var (first, last) = Planner.Span(p);
+        return new JsonObject
+        {
+            ["audience"] = audience,
+            ["first"] = first.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            ["last"] = last.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+        };
+    }
+
+    public static string? ChoiceValue(JsonNode? node) =>
+        node is JsonObject o && o["audience"] is JsonValue v && v.TryGetValue<string>(out var s) ? Audience.Parse(s) : null;
+
+    public static DateOnly? Day(JsonNode? node) =>
+        node is JsonValue v && v.TryGetValue<string>(out var s)
+            && DateOnly.TryParseExact(s, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : null;
 
     public static bool Approved(JsonObject state, string hash) =>
         state["approved"] is JsonArray a && a.Any(x => x?.GetValue<string>() == hash);
@@ -85,14 +132,50 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             owner = Owner.Ours;
         else
             owner = setting.Idle(nowUtc) ? Owner.Idle : Owner.Theirs;
-        return new Picture(periods, setting, owner, written, now, nowUtc);
+        return new Picture(periods, setting, owner, written, now, nowUtc, Audiences(state, periods, written));
     }
+
+    /// <summary>Each period's audience: chosen for its id; else a choice kept for an id no longer in the calendar whose
+    /// days overlap it (its first day moved); else the settings'.</summary>
+    private Dictionary<string, Audience> Audiences(JsonObject state, List<Period> periods, JsonObject? written)
+    {
+        var table = state["audience"] as JsonObject;
+        var ids = periods.Select(p => p.Id).ToHashSet(StringComparer.Ordinal);
+        var result = new Dictionary<string, Audience>(StringComparer.Ordinal);
+        foreach (var p in periods)
+        {
+            var settings = Planner.SettingsAudience(config, p);
+            if (State.ChoiceValue(table?[p.Id]) is { } mine)
+            {
+                result[p.Id] = new Audience(mine, settings, true);
+                continue;
+            }
+            var (first, last) = Planner.Span(p);
+            var carried = table?.FirstOrDefault(kv => !ids.Contains(kv.Key) && State.ChoiceValue(kv.Value) is not null
+                && State.Day(kv.Value?["first"]) is { } f && State.Day(kv.Value?["last"]) is { } l && f <= last && l >= first);
+            if (carried is { Key: { } from } c)
+                result[p.Id] = new Audience(State.ChoiceValue(c.Value)!, settings, true, from);
+            // The reply written for this period records its choice too (kept in the table before the write, so this
+            // is only a fallback): never compared against the settings' instead, which would rewrite it.
+            else if (written?["period"]?.GetValue<string>() == p.Id && Audience.Parse(written["audience"]?.GetValue<string>() ?? "") is { } w)
+                result[p.Id] = new Audience(w, settings, true);
+            else
+                result[p.Id] = new Audience(settings, settings);
+        }
+        return result;
+    }
+
+    /// <summary>A period's audience (the settings' for one the picture doesn't hold).</summary>
+    public Audience AudienceOf(Period p, Picture pic) =>
+        pic.Audiences.TryGetValue(p.Id, out var a) ? a : new Audience(Planner.SettingsAudience(config, p), Planner.SettingsAudience(config, p));
+
+    private string? Chosen(Period p, Picture pic) => AudienceOf(p, pic) is { Chosen: true } a ? a.Value : null;
 
     /// <summary>A period's reply, its start moved a few minutes ahead if the window has already begun (a reply can
     /// only be scheduled from the future), or kept as written when it's ours and already running.</summary>
-    public Reply Want(Period p, Picture pic, DateTime? keepStartUtc = null)
+    public Reply Want(Period p, Picture pic, DateTime? keepStartUtc = null, string? audience = null)
     {
-        var reply = Planner.Render(config, p);
+        var reply = Planner.Render(config, p, audience ?? AudienceOf(p, pic).Value);
         if (keepStartUtc is { } kept)
             return reply with { StartUtc = kept };
         var soonest = pic.NowUtc.AddMinutes(5);
@@ -172,6 +255,7 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             pic = pic with { Written = null };
         }
 
+        KeepChoices(state, pic, dryRun, said);
         if (pic.Owner == Owner.Ours)
             Follow(state, pic, dryRun, said);
         else if (pic.Owner == Owner.Theirs)
@@ -181,6 +265,36 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
         if (!dryRun)
             State.Save(config.StateFile, state);
         return said;
+    }
+
+    /// <summary>The audiences chosen per period: carried to a period's new id when its first day moved (said, and kept),
+    /// each one's days kept up to date, and pruned once its period is over.</summary>
+    private void KeepChoices(JsonObject state, Picture pic, bool dryRun, List<string> said)
+    {
+        var carried = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var p in pic.Periods)
+        {
+            if (AudienceOf(p, pic) is not { Chosen: true } a)
+                continue;
+            if (a.CarriedFrom is { } from)
+            {
+                said.Add($"{p.Id}: who outside gets a reply ({Audience.Words(a.Value)}) is carried over from {from}, whose first day moved.");
+                carried.Add(from);
+            }
+            if (!dryRun)
+                State.Table(state, "audience")[p.Id] = State.Choice(a.Value, p);
+        }
+        if (dryRun || state["audience"] is not JsonObject table)
+            return;
+        foreach (var from in carried)
+            table.Remove(from);
+        var today = DateOnly.FromDateTime(pic.Now);
+        var writtenId = pic.Written?["period"]?.GetValue<string>();
+        foreach (var (id, node) in table.ToList())
+            if (id != writtenId && !pic.Periods.Any(p => p.Id == id) && (State.Day(node?["last"]) is not { } last || last < today))
+                table.Remove(id);
+        if (table.Count == 0)
+            state.Remove("audience");
     }
 
     /// <summary>A write whose answer was lost: settled by reading back, never by writing blind.</summary>
@@ -257,12 +371,16 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             return;
         }
         var how = oldEnd is { } e && want.EndUtc > e ? "longer" : oldEnd is { } e2 && want.EndUtc < e2 ? "shorter" : "changed";
-        said.Add($"{period.Id}: the period is {how}, so the reply is rewritten: {Window(want)}.");
+        var audience = AudienceOf(period, pic);
+        var moved = period.Id != id && audience.Chosen
+            ? $" It starts on a different day now, so it's {period.Id}; who outside gets a reply ({Audience.Words(audience.Value)}, chosen for {id}) is carried over."
+            : "";
+        said.Add($"{period.Id}: the period is {how}, so the reply is rewritten: {Window(want)}.{moved}");
         if (!dryRun)
         {
-            Write(state, pic, period.Id, want, period, keepStart: running);
+            Write(state, pic, period.Id, want, period, keepStart: running, chosen: Chosen(period, pic));
             Raise("changed", $"Out of office: your {period.KindName} is {how}, so the reply now runs {Window(want)}", period.Id, want,
-                "Nothing to do; just so you know.");
+                "Nothing to do; just so you know." + moved, audience);
         }
     }
 
@@ -328,8 +446,9 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             said.Add($"{next.Id}: writing (act mode, messages approved): {Window(want)}.");
             if (!dryRun)
             {
-                Write(state, pic, next.Id, want, next);
-                Raise("changed", $"Out of office: scheduled your reply for {Describe(next)}, {Window(want)}", next.Id, want, "Nothing to do; just so you know.");
+                Write(state, pic, next.Id, want, next, chosen: Chosen(next, pic));
+                Raise("changed", $"Out of office: scheduled your reply for {Describe(next)}, {Window(want)}", next.Id, want, "Nothing to do; just so you know.",
+                    AudienceOf(next, pic));
             }
             return;
         }
@@ -345,13 +464,16 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
     {
         var raised = State.Table(state, "raised");
         // Keyed on the reply as the calendar gives it, not the start moved to now for one already running, so a
-        // period isn't raised again on every run.
-        var fp = Planner.Render(config, p).Fingerprint();
+        // period isn't raised again on every run; with its audience, so a choice made ahead updates the question.
+        var audience = AudienceOf(p, pic);
+        var fp = Planner.Render(config, p, audience.Value).Fingerprint();
         if (raised[p.Id]?.GetValue<string>() != fp)
         {
             raised[p.Id] = fp;
             Raise(Item, $"Out of office: schedule your reply for {Describe(p)}?", p.Id, want,
-                $"Check the dates and both messages, then `calendar-out-of-office apply {p.Id} --yes` (on your OK only).");
+                $"Check the dates, who outside gets one and both messages, then `calendar-out-of-office apply {p.Id} --yes` (on your OK only); "
+                + $"`calendar-out-of-office apply {p.Id} --external-audience none|contactsOnly|all --yes` chooses who outside gets one for this period.",
+                audience);
         }
         if (WorkingDaysUntil(DateOnly.FromDateTime(pic.Now), DateOnly.FromDateTime(p.On)) <= config.NotifyWorkingDays)
             NotifyOnce(state, "proposed:" + p.Id, "Out of office: a reply to approve",
@@ -368,11 +490,10 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
     }
 
     /// <summary>Apply: schedule one period's reply on the user's say-so. Without --yes, shows what it would write.</summary>
-    public int Apply(JsonObject state, string id, bool yes)
+    public int Apply(JsonObject state, string id, bool yes, string? audience = null)
     {
         var pic = Look(state);
-        var p = pic.Periods.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase))
-                ?? throw new UsageException($"No period '{id}' in the next {config.DaysAhead} days. `calendar-out-of-office plan` lists them.");
+        var p = Find(pic, id);
         if (Refused(p, state) is { } why && !why.StartsWith("you changed", StringComparison.Ordinal))
             throw new UsageException($"{p.Id} can't be scheduled: {why}.");
         if (pic.Owner == Owner.Theirs)
@@ -380,22 +501,80 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
         var keep = pic.Owner == Owner.Ours && Holding(pic)?.Id == p.Id && State.Time(pic.Written!["start"]) is { } s && s <= pic.NowUtc ? s : (DateTime?)null;
         if (pic.Owner == Owner.Ours && Holding(pic)?.Id != p.Id)
             throw new UsageException($"The reply for {pic.Written!["period"]} is on; only one can be scheduled at a time. `calendar-out-of-office clear --yes` turns it off first.");
-        var want = Want(p, pic, keep);
-        host.Out.WriteLine(Preview(p, want));
+        var current = AudienceOf(p, pic);
+        var a = audience is null ? current : new Audience(audience, current.Settings, true);
+        var want = Want(p, pic, keep, a.Value);
+        host.Out.WriteLine(Preview(p, want, a));
         if (!yes)
         {
-            host.Out.WriteLine($"\nNothing written. `calendar-out-of-office apply {p.Id} --yes` schedules it.");
+            host.Out.WriteLine(audience is null
+                ? $"\nNothing written. `calendar-out-of-office apply {p.Id} --yes` schedules it; `--external-audience none|contactsOnly|all` chooses who outside gets one for this period."
+                : $"\nNothing written. `calendar-out-of-office apply {p.Id} --external-audience {audience} --yes` schedules it.");
             return 0;
         }
         if (!office.CanWrite())
             throw new SignInNeededException("Scheduling a reply needs the MailboxSettings.ReadWrite permission, which this sign-in doesn't have yet. "
                                             + "Run `calendar-out-of-office sign-in` at a console (your organisation may need to approve it first).");
-        Write(state, pic, p.Id, want, p, keepStart: keep is not null);
+        // The choice is kept before the write, so a write whose answer is lost (settled by reading back later) is
+        // compared with the audience it was written with, never the settings'.
+        if (a.Chosen)
+        {
+            var table = State.Table(state, "audience");
+            table[p.Id] = State.Choice(a.Value, p);
+            if (current.CarriedFrom is { } from)
+                table.Remove(from);
+        }
+        Write(state, pic, p.Id, want, p, keepStart: keep is not null, chosen: a.Chosen ? a.Value : null);
+        // Approves the messages (the templates' hash) for act mode; who outside gets them is never part of approving.
         State.Approve(state, Planner.TemplateHash(config, p.IsLeave));
         State.Table(state, "hands_off").Remove(p.Id);
         DoneItems(p.Id);
         State.Save(config.StateFile, state);
         host.Out.WriteLine($"\nScheduled: {Window(want)}.");
+        return 0;
+    }
+
+    private Period Find(Picture pic, string id) =>
+        pic.Periods.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase))
+        ?? throw new UsageException($"No period '{id}' in the next {config.DaysAhead} days. `calendar-out-of-office plan` lists them.");
+
+    /// <summary>Audience: choose who outside gets a period's reply ahead of time (none, contactsOnly, all), or go back to
+    /// the settings (default). Local only: nothing is sent. A reply already written is changed only by apply.</summary>
+    public int SetAudience(JsonObject state, string id, string value)
+    {
+        var pic = Look(state);
+        var p = Find(pic, id);
+        var current = AudienceOf(p, pic);
+        var wanted = value == "default" ? null : value;
+        var target = wanted ?? current.Settings;
+        if (pic.Owner == Owner.Ours && Holding(pic)?.Id == p.Id)
+        {
+            if (target == current.Value)
+            {
+                host.Out.WriteLine($"{p.Id}: its reply is written already, to {Audience.Words(current.Value)} outside: nothing to change.");
+                return 0;
+            }
+            throw new UsageException($"{p.Id}: its reply is written already, to {Audience.Words(current.Value)} outside, so nothing was changed. "
+                                     + $"`calendar-out-of-office apply {p.Id} --external-audience {target} --yes` rewrites it (without --yes, it shows it first).");
+        }
+        var table = State.Table(state, "audience");
+        if (current.CarriedFrom is { } from)
+            table.Remove(from);
+        if (wanted is null)
+        {
+            table.Remove(p.Id);
+            host.Out.WriteLine($"{p.Id}: who outside gets a reply is back to the settings: {Audience.Words(current.Settings)}.");
+        }
+        else
+        {
+            table[p.Id] = State.Choice(wanted, p);
+            host.Out.WriteLine($"{p.Id}: who outside gets a reply: {new Audience(wanted, current.Settings, true).Describe()}.");
+        }
+        if (table.Count == 0)
+            state.Remove("audience");
+        State.Save(config.StateFile, state);
+        host.Out.WriteLine($"Nothing is sent now: it's used when the reply is written (`calendar-out-of-office apply {p.Id} --yes`"
+                           + (config.Mode == Mode.Act ? ", or act mode when it's due" : "") + ").");
         return 0;
     }
 
@@ -427,7 +606,7 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
 
     /// <summary>Schedule (or, with no reply, turn off), then read back. "writing" is saved first, so an answer that never
     /// comes is settled by the next run's read, never by writing again blind.</summary>
-    private void Write(JsonObject state, Picture pic, string id, Reply? reply, Period? period, bool keepStart = false)
+    private void Write(JsonObject state, Picture pic, string id, Reply? reply, Period? period, bool keepStart = false, string? chosen = null)
     {
         var expected = reply?.Fingerprint() ?? "idle";
         var previous = pic.Setting.Idle(pic.NowUtc) ? "idle" : pic.Setting.Fingerprint();
@@ -446,6 +625,8 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             record["end"] = State.Stamp(reply.EndUtc);
             record["kind"] = period?.KindName;
             record["templates"] = period is null ? null : Planner.TemplateHash(config, period.IsLeave);
+            if (chosen is not null)
+                record["audience"] = chosen;   // a value, not a message
         }
         state["writing"] = record;
         State.Save(config.StateFile, state);
@@ -529,7 +710,7 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
     }
 
     /// <summary>A review item for the session (the previous one for the same period and type replaced).</summary>
-    private void Raise(string type, string title, string period, Reply? reply, string todo)
+    private void Raise(string type, string title, string period, Reply? reply, string todo, Audience? audience = null)
     {
         if (config.Review is not { } review)
             return;
@@ -545,7 +726,11 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             fields["internal"] = Planner.Plain(reply.Internal);
             fields["external"] = Planner.Plain(reply.External);
             fields["audience"] = reply.Audience;
+            if (audience is not null)
+                fields["outside"] = audience.Describe();
             fields["command"] = $"calendar-out-of-office apply {period} --yes";
+            if (type == Item)
+                fields["command_audience"] = $"calendar-out-of-office apply {period} --external-audience none|contactsOnly|all --yes";
         }
         queue.Add(review.Source, type, fields);
     }
@@ -588,10 +773,10 @@ public sealed class Runner(Config config, IOffice office, CliHost host)
             ? $"leave from {Planner.Date(config, p.First)}, back {Planner.Date(config, p.ReturnDay)}"
             : $"{p.Event ?? "a conference"}, {Planner.Date(config, p.First)}" + (p.Last != p.First ? $" to {Planner.Date(config, p.Last)}" : "");
 
-    public string Preview(Period p, Reply want) =>
+    public string Preview(Period p, Reply want, Audience audience) =>
         $"{p.Id}: {Describe(p)} ({p.WeekdaysAway:0.#} weekday(s) away)\n"
         + $"  window    {Window(want)}\n"
-        + $"  external  to {want.Audience}\n"
+        + $"  outside   {audience.Describe()}\n"
         + $"  internal  {Planner.Plain(want.Internal)}\n"
-        + $"  external  {Planner.Plain(want.External)}";
+        + $"  external  {(want.Audience == "none" ? "not sent (no one outside gets a reply)" : Planner.Plain(want.External))}";
 }

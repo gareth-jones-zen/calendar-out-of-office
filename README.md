@@ -14,7 +14,7 @@ Mode: ask. Automatic replies now: disabled (off).
 
 leave-2027-03-10: leave from Wednesday 10 March, back Monday 15 March (3 weekday(s) away)
   window    Tue 9 Mar 17:30 to Mon 15 Mar 08:00
-  external  to all
+  outside   everyone (the settings)
   internal  I'm on leave, back on Monday 15 March. For anything urgent, please contact Alex Example.
   external  I'm on leave and back on Monday 15 March; I'll reply to your message when I return.
   days      Wed 10: leave, Thu 11: leave, Fri 12: leave, Sat 13: weekend, Sun 14: weekend
@@ -30,7 +30,8 @@ Windows (x64) only; nothing else is needed.
 1. Download `calendar-out-of-office-<version>-win-x64.zip` from [Releases](https://github.com/gareth-jones-zen/calendar-out-of-office/releases).
 2. Unzip it to a folder that will stay put, such as `%LOCALAPPDATA%\Programs\calendar-out-of-office`.
 3. `calendar-out-of-office config` creates the settings file; write your messages. `calendar-out-of-office sign-in` signs you in (once).
-4. `calendar-out-of-office plan` shows each period and its messages; `calendar-out-of-office apply <id> --yes` schedules one;
+4. `calendar-out-of-office plan` shows each period and its messages; `calendar-out-of-office apply <id> --yes` schedules one
+   (`--external-audience` chooses who outside gets it, for that period);
    `calendar-out-of-office autostart on` keeps watching (every 15 minutes, at logon and a minute after each unlock), asking
    about each new period and following changes to ones it has written.
 
@@ -86,7 +87,50 @@ Two per kind of period, internal and external (`[leave]` and `[conference]`), pl
 blank line, lines within a paragraph joined. They're escaped and sent as HTML. **Placeholders:** `{return_day}`,
 `{first_day}`, `{last_day}`, `{event}` (the conference's name, without a leading "At "), and any you define in
 `[placeholders]` (who to contact, say). An unknown placeholder is an error when the settings are read. Dates follow
-`date_format` ("dddd d MMMM": "Monday 15 March"). `external_audience` is `none`, `contactsOnly` or `all`.
+`date_format` ("dddd d MMMM": "Monday 15 March"). `external_audience` is `none`, `contactsOnly` or `all`: who outside
+your organisation gets the external message, for every period of that kind unless one is chosen for a period (below).
+
+## Who outside gets a reply, per period
+
+The settings give each kind its audience; a particular period can have its own. Say your leave goes to everyone, but
+for one week you'd rather only your contacts heard:
+
+```
+calendar-out-of-office apply leave-2027-03-10 --external-audience contactsOnly          # the preview
+calendar-out-of-office apply leave-2027-03-10 --external-audience contactsOnly --yes    # schedules it, to your contacts only
+```
+
+```
+leave-2027-03-10: leave from Wednesday 10 March, back Monday 15 March (3 weekday(s) away)
+  window    Tue 9 Mar 17:30 to Mon 15 Mar 08:00
+  outside   your contacts only (chosen for this period; the settings say everyone)
+  ...
+```
+
+Or choose it ahead, before the reply is written (in act mode, which writes without asking, this is the only way):
+
+```
+calendar-out-of-office audience leave-2027-03-10 none       # no one outside gets a reply for this period
+calendar-out-of-office audience leave-2027-03-10 default    # back to the settings
+```
+
+- **`audience` is local:** nothing is sent until the reply is written (`apply <id> --yes`, or act mode when it's due).
+  In ask mode, the period's review item is raised again with the new audience on the next run.
+- **The values** are Graph's: `none` (no one outside; `plan` shows the external message as "not sent"; the internal one
+  is unaffected), `contactsOnly`, `all`, in any case.
+- **A reply already written** is changed only by `apply <id> --external-audience <value> --yes` again: one write,
+  previewed without `--yes`, sent once and settled by reading back like every write. `audience` on a written period
+  changes nothing and prints that command.
+- **It stays with the period:** a rewrite (the period longer, shorter or moved) keeps it. If the first day moves, the
+  period's id changes (`leave-2027-03-10` becomes `leave-2027-03-09`), and the choice is carried to the new period when
+  their days overlap; `plan` and the "changed" review item say so.
+- **It's part of what calendar-out-of-office compares** to know the reply is still the one it wrote, so a reply
+  written to your contacts only isn't mistaken for one you changed in Outlook.
+- **It never approves anything:** act mode writes only messages approved by hand (`apply --yes` once), whoever they're
+  going to.
+- **Where it's shown:** `plan` (the audience and where it came from: the settings, chosen for this period, or carried
+  over), the `proposed` review item (`audience`, `outside`, and the `apply` command with and without the flag:
+  `command`, `command_audience`), and `show`.
 
 ## What it does on its own, and what it asks
 
@@ -109,8 +153,8 @@ status message is retried like a read, because setting the same message again no
 (the third in a row, or at once for a sign-in). Success is silent. Review items go to the queue named in `[review]`
 (see [background-tools-lib](https://github.com/gareth-jones-zen/background-tools-lib)'s ReviewQueue).
 
-**The state file** holds fingerprints and times of what was written, and which messages were approved: never the
-messages.
+**The state file** holds fingerprints and times of what was written, which messages were approved, and the audience
+chosen for a period (the value and the period's first and last days, dropped once it's over): never the messages.
 
 ## Commands
 
@@ -118,7 +162,8 @@ messages.
 |---|---|
 | `plan` | Each period: why, the window, both messages, the days; then what a run would do, and whether a write is possible. Reads only |
 | `show` | Your automatic replies now, and what calendar-out-of-office last wrote |
-| `apply <id> [--yes]` | Schedule one period's reply. Without `--yes`, shows it and changes nothing |
+| `apply <id> [--external-audience none\|contactsOnly\|all] [--yes]` | Schedule one period's reply, to the audience chosen (kept for that period). Without `--yes`, shows it and changes nothing |
+| `audience <id> none\|contactsOnly\|all\|default` | Choose who outside gets a period's reply ahead of time, or go back to the settings. Local only; for a reply already written, says so and prints the `apply` command that would rewrite it |
 | `clear [--yes] [--force]` | Turn off the reply it wrote; `--force` turns off one it didn't |
 | `run [--dry-run]` | What the scheduled task does |
 | `autostart on\|off\|restart\|status` | The scheduled task, from `[schedule]` (every 15 minutes, at logon, and a minute after unlocking, by default); `status` says when the settings have changed since it was registered |

@@ -194,13 +194,24 @@ public static class Planner
         return Regex.Replace(WebUtility.HtmlDecode(noTags), @"\s+", " ").Trim();
     }
 
-    /// <summary>The reply for a period: the window in UTC and the two messages.</summary>
-    public static Reply Render(Config config, Period p)
+    /// <summary>The reply for a period: the window in UTC, the two messages, and who outside gets one (the audience
+    /// chosen for the period, or the settings' for its kind).</summary>
+    public static Reply Render(Config config, Period p, string? audience = null)
     {
         var messages = p.IsLeave ? config.LeaveMessages : config.ConferenceMessages;
         var values = Values(config, p);
         return new Reply(Utc(config, p.On), Utc(config, p.Off), Html(Fill(messages.Internal, values)), Html(Fill(messages.External, values)),
-            messages.Audience);
+            audience ?? messages.Audience);
+    }
+
+    /// <summary>The settings' audience for a period's kind.</summary>
+    public static string SettingsAudience(Config config, Period p) => (p.IsLeave ? config.LeaveMessages : config.ConferenceMessages).Audience;
+
+    /// <summary>A period's first and last days away (weekends at either end left out), never throwing.</summary>
+    public static (DateOnly First, DateOnly Last) Span(Period p)
+    {
+        var away = p.Days.Where(d => d.Kind != Kind.Weekend).ToList();
+        return away.Count > 0 ? (away[0].Date, away[^1].Date) : (p.Days[0].Date, p.Days[^1].Date);
     }
 
     public static DateTime Utc(Config config, DateTime local) =>

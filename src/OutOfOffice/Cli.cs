@@ -37,7 +37,7 @@ public static class Cli
     public const string TaskName = "calendar-out-of-office run";
     public const string BackgroundExe = "calendar-out-of-office-background.exe";
 
-    private const string Usage = "usage: calendar-out-of-office [-h] [--version] [--config CONFIG] {plan,show,apply,clear,run,autostart,sign-in,config} ...";
+    private const string Usage = "usage: calendar-out-of-office [-h] [--version] [--config CONFIG] {plan,show,apply,audience,clear,run,autostart,sign-in,config} ...";
 
     // Explicit "\n" throughout (a raw literal would take the .cs file's line endings).
     public const string Help =
@@ -47,7 +47,10 @@ public static class Cli
         "reply you set yourself, and in ask mode (the default) writes nothing without `apply ... --yes`.\n\n" +
         "    calendar-out-of-office plan                 each period away, its window and messages, and what a run would do\n" +
         "    calendar-out-of-office show                 your automatic replies now, and what calendar-out-of-office last wrote\n" +
-        "    calendar-out-of-office apply ID [--yes]     schedule one period's reply (without --yes: show it, change nothing)\n" +
+        "    calendar-out-of-office apply ID [--yes]     schedule one period's reply (without --yes: show it, change nothing);\n" +
+        "                                                --external-audience none|contactsOnly|all: who outside gets one, for this period\n" +
+        "    calendar-out-of-office audience ID VALUE    choose who outside gets a period's reply ahead (none, contactsOnly, all;\n" +
+        "                                                default: back to the settings); local only, a written reply changes only by apply\n" +
         "    calendar-out-of-office clear [--yes]        turn off the reply it wrote (--force: whoever wrote it)\n" +
         "    calendar-out-of-office run [--dry-run]      what the scheduled task does: propose, adjust, or (act mode) write\n" +
         "    calendar-out-of-office autostart on         run every few minutes, at logon and after unlocking (off, restart, status)\n" +
@@ -58,7 +61,7 @@ public static class Cli
         "  --version        show program's version number and exit\n" +
         "  --config CONFIG  settings file (default %APPDATA%\\calendar-out-of-office\\config.toml)\n";
 
-    private static readonly string[] Commands = ["plan", "show", "apply", "clear", "run", "autostart", "sign-in", "config"];
+    private static readonly string[] Commands = ["plan", "show", "apply", "audience", "clear", "run", "autostart", "sign-in", "config"];
 
     public static string Version =>
         typeof(Cli).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0";
@@ -71,6 +74,7 @@ public static class Cli
         public bool DryRun;
         public bool Yes;
         public bool Force;
+        public string? Audience;
     }
 
     private sealed class ArgumentsException(string message) : Exception(message);
@@ -119,7 +123,8 @@ public static class Cli
             {
                 "plan" => Plan(config, runner, office, state, host),
                 "show" => Show(config, runner, office, state, host),
-                "apply" => runner.Apply(state, options.Args[0], options.Yes),
+                "apply" => runner.Apply(state, options.Args[0], options.Yes, options.Audience),
+                "audience" => runner.SetAudience(state, options.Args[0], options.Args[1]),
                 "clear" => runner.Clear(state, options.Yes, options.Force),
                 _ => RunOnce(config, runner, state, host, options.DryRun),
             };
@@ -165,7 +170,7 @@ public static class Cli
         foreach (var p in pic.Periods)
         {
             host.Out.WriteLine("");
-            host.Out.WriteLine(runner.Preview(p, runner.Want(p, pic)));
+            host.Out.WriteLine(runner.Preview(p, runner.Want(p, pic), runner.AudienceOf(p, pic)));
             host.Out.WriteLine($"  days      {string.Join(", ", p.Days.Select(d => $"{d.Date:ddd d}: {Short(d.Kind)}" + (d.Kind == Kind.Conference ? $" ({d.Why})" : "")))}");
             if (runner.Refused(p, state) is { } why)
                 host.Out.WriteLine($"  not written: {why}");
@@ -197,12 +202,17 @@ public static class Cli
                            + pic.Owner switch { Owner.Ours => ", written by calendar-out-of-office", Owner.Theirs => ", set outside calendar-out-of-office", _ => "" });
         if (s.Status != "disabled" || s.Internal.Length > 0)
         {
-            host.Out.WriteLine($"  external to   {s.Audience}");
+            host.Out.WriteLine($"  external to   {s.Audience} ({Audience.Words(s.Audience)})");
             host.Out.WriteLine($"  internal      {Planner.Plain(s.Internal)}");
             host.Out.WriteLine($"  external      {Planner.Plain(s.External)}");
         }
         if (state["written"] is JsonObject w)
-            host.Out.WriteLine($"Last written by calendar-out-of-office: {w["period"]} at {w["at"]} (UTC).");
+            host.Out.WriteLine($"Last written by calendar-out-of-office: {w["period"]} at {w["at"]} (UTC)"
+                               + (w["audience"]?.ToString() is { } chosen ? $", to {Audience.Words(chosen)} outside (chosen for that period)." : "."));
+        if (state["audience"] is JsonObject chosenAhead)
+            foreach (var (id, node) in chosenAhead.Where(kv => kv.Key != (state["written"]?["period"]?.ToString() ?? "")))
+                if (State.ChoiceValue(node) is { } value)
+                    host.Out.WriteLine($"Chosen for {id}: {Audience.Words(value)} outside ({value}).");
         if (state["writing"] is JsonObject wr)
             host.Out.WriteLine($"A write for {wr["period"]} hasn't been confirmed yet; the next run reads it back.");
         return 0;
@@ -296,6 +306,15 @@ public static class Cli
         return string.Join(", ", parts);
     }
 
+    /// <summary>none, contactsOnly or all (any case, as Graph spells them), or default where allowed.</summary>
+    private static string AudienceArgument(string text, string what, bool withDefault)
+    {
+        if (withDefault && text.Equals("default", StringComparison.OrdinalIgnoreCase))
+            return "default";
+        return Audience.Parse(text)
+               ?? throw new ArgumentsException($"{what}: invalid choice: '{text}' (choose from 'none', 'contactsOnly', 'all'{(withDefault ? ", 'default'" : "")})");
+    }
+
     private static Options? Parse(IReadOnlyList<string> argv, CliHost host)
     {
         var options = new Options();
@@ -346,6 +365,14 @@ public static class Cli
                 case ("clear", "--force"):
                     options.Force = true;
                     break;
+                case ("apply", "--external-audience"):
+                    if (++i >= argv.Count)
+                        throw new ArgumentsException("argument --external-audience: expected one argument (none, contactsOnly or all)");
+                    options.Audience = AudienceArgument(argv[i], "argument --external-audience", withDefault: false);
+                    break;
+                case ("apply", _) when arg.StartsWith("--external-audience=", StringComparison.Ordinal):
+                    options.Audience = AudienceArgument(arg["--external-audience=".Length..], "argument --external-audience", withDefault: false);
+                    break;
                 default:
                     if (arg.StartsWith('-') && arg != "-")
                         throw new ArgumentsException($"unrecognized arguments: {arg}");
@@ -353,13 +380,18 @@ public static class Cli
                     break;
             }
         }
-        var max = options.Command is "autostart" or "apply" ? 1 : 0;
+        var max = options.Command is "autostart" or "apply" ? 1 : options.Command == "audience" ? 2 : 0;
         if (options.Command == "autostart" && options.Args.Count == 0)
             throw new ArgumentsException("the following arguments are required: action");
         if (options.Command == "apply" && options.Args.Count == 0)
             throw new ArgumentsException("the following arguments are required: id (from `calendar-out-of-office plan`)");
+        if (options.Command == "audience" && options.Args.Count < 2)
+            throw new ArgumentsException("the following arguments are required: " + (options.Args.Count == 0 ? "id, " : "")
+                                         + "audience (none, contactsOnly, all or default)");
         if (options.Args.Count > max)
             throw new ArgumentsException($"unrecognized arguments: {string.Join(" ", options.Args.Skip(max))}");
+        if (options.Command == "audience")
+            options.Args[1] = AudienceArgument(options.Args[1], "argument audience", withDefault: true);
         if (options.Command == "autostart" && options.Args[0] is not ("on" or "off" or "restart" or "status"))
             throw new ArgumentsException($"argument action: invalid choice: '{options.Args[0]}' (choose from 'on', 'off', 'restart', 'status')");
         return options;
